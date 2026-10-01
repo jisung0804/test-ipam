@@ -35,3 +35,39 @@ def apply_labels(labels):
                     if name in form.base_fields:
                         form.base_fields[name].label = label
     logger.info('IPAM 화면 라벨 적용: %s', labels)
+
+
+def patch_ip_search():
+    """IP 주소 목록의 '빠른 검색'을 '앞뒤 상관없이 포함' 검색으로 바꾼다.
+    대상: IP 주소(아무 부분), 호스트 이름, 호실명(설명), 비고, 소속 이름, 사용자 정의 필드 전체(관리자·전화·MAC·용도 등),
+          호관호실·스위치 이름(연결된 객체 이름), MAC 은 구분자(:, -, .) 없이 쳐도 찾음"""
+    import re
+    from django.db.models import Q
+    from django.db.models.expressions import RawSQL
+    from ipam.filtersets import IPAddressFilterSet
+
+    def search(self, queryset, name, value):
+        v = (value or '').strip()
+        if not v:
+            return queryset
+        like = '%' + v.replace('\\', '\\\\').replace('%', '\\%').replace('_', '\\_') + '%'
+        q = (Q(dns_name__icontains=v) | Q(description__icontains=v) | Q(comments__icontains=v) |
+             Q(tenant__name__icontains=v) |
+             Q(pk__in=RawSQL('SELECT id FROM ipam_ipaddress WHERE host(address) LIKE %s', [like])) |
+             Q(pk__in=RawSQL('SELECT t.id FROM ipam_ipaddress t, jsonb_each_text(t.custom_field_data) e '
+                             'WHERE e.value ILIKE %s', [like])))
+        hexv = re.sub(r'[^0-9a-fA-F]', '', v)
+        if len(hexv) >= 4 and re.fullmatch(r'[0-9a-fA-F:.\- ]+', v):
+            q |= Q(pk__in=RawSQL("SELECT id FROM ipam_ipaddress WHERE replace(custom_field_data->>'host_mac', ':', '') "
+                                 "ILIKE %s OR replace(custom_field_data->>'obs_mac', ':', '') ILIKE %s",
+                                 ['%' + hexv + '%', '%' + hexv + '%']))
+        from dcim.models import Device, Location
+        loc_ids = list(Location.objects.filter(name__icontains=v).values_list('pk', flat=True)[:500])
+        dev_ids = list(Device.objects.filter(name__icontains=v).values_list('pk', flat=True)[:500])
+        if loc_ids:
+            q |= Q(custom_field_data__room__in=loc_ids)
+        if dev_ids:
+            q |= Q(custom_field_data__switch__in=dev_ids)
+        return queryset.filter(q)
+
+    IPAddressFilterSet.search = search

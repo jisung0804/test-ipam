@@ -5,7 +5,7 @@ class IPRequestConfig(PluginConfig):
     name = 'netbox_ip_request'
     verbose_name = 'IP 발급 신청'
     description = 'IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정'
-    version = '0.3.1'
+    version = '0.4.0'
     base_url = 'ip-request'
     min_version = '4.5.0'
     default_settings = {
@@ -26,14 +26,19 @@ class IPRequestConfig(PluginConfig):
         # ---- 화면
         'field_labels': {},        # IP 주소 기본 칸의 화면 이름 바꾸기 {'tenant': '소속', ...}
         'draggable_tables': ['ipam.ipaddress'],  # 열 제목 끌어서 순서 바꾸기를 켤 목록
+        'contains_search': True,   # IP 주소 빠른 검색: 앞뒤 상관없이 포함 검색 (끄면 NetBox 기본)
+        'recon_days': 30,          # 대사: 이 기간 안에 ARP 에 안 보이면 '미관측'
+        'inventory_interval': 1440,  # 장비 인터페이스·VLAN 동기화 주기(분). 0 = 끔
     }
 
     def ready(self):
         super().ready()
         from . import jobs  # noqa: F401  (system job 등록)
-        from .ui import apply_labels
+        from .ui import apply_labels, patch_ip_search
         from netbox.plugins import get_plugin_config
         apply_labels(get_plugin_config('netbox_ip_request', 'field_labels'))
+        if get_plugin_config('netbox_ip_request', 'contains_search'):
+            patch_ip_search()
         # DB 준비(migrate) 직후 필요한 사용자 정의 필드·태그를 자동 생성 (netbox-docker는 시작할 때마다 migrate 실행)
         from django.db.models.signals import post_migrate
         post_migrate.connect(_ensure_objects, sender=self)

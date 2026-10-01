@@ -56,7 +56,10 @@ def reset():
     IPAddress.objects.all().delete(); Prefix.objects.all().delete(); VLAN.objects.all().delete()
     Interface.objects.all().delete(); Device.objects.all().delete()
     from dcim.models import Location; [l.delete() for l in sorted(Location.objects.all(), key=lambda l: -len(str(l.path)))]
-    for M in (DeviceType, DeviceRole, Manufacturer, Site, Tenant):
+    from dcim.models import Platform
+    from ipam.models import VLANGroup
+    VLANGroup.objects.all().delete()
+    for M in (DeviceType, DeviceRole, Platform, Manufacturer, Site, Tenant):
         M.objects.all().delete()
     User.objects.filter(username='kim').delete()
 

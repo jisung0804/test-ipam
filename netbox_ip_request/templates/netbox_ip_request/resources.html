@@ -1,0 +1,57 @@
+{% extends 'generic/_base.html' %}
+{% block title %}IP 자원 현황 (VLAN별){% endblock %}
+{% block subtitle %}<div class="text-secondary">실사용 = 최근 {{ days }}일 L3 장비 ARP 에 보인 IP · 가용 = 전체 − (대장 ∪ 실사용) · L2 단말 = 최근 1일 스위치 MAC 테이블</div>{% endblock %}
+{% block control-buttons %}
+  <a href="?{{ export_qs }}" class="btn btn-primary"><i class="mdi mdi-microsoft-excel"></i> 엑셀 내보내기</a>
+  <a href="{% url 'extras:script_list' %}" class="btn btn-outline-secondary" title="VLAN 이름·설명을 엑셀로 올리기: 도구 > VLAN 정보 엑셀 업로드"><i class="mdi mdi-upload"></i> VLAN 엑셀 업로드</a>
+{% endblock %}
+{% block content %}
+<div class="row mb-3">
+  <div class="col-6 col-md-2"><div class="card"><div class="card-body p-2"><div class="text-secondary small">대역 수</div><div class="h2 m-0">{{ tot.count }}</div></div></div></div>
+  <div class="col-6 col-md-2"><div class="card"><div class="card-body p-2"><div class="text-secondary small">전체 주소</div><div class="h2 m-0">{{ tot.size }}</div></div></div></div>
+  <div class="col-6 col-md-2"><div class="card"><div class="card-body p-2"><div class="text-secondary small">대장 등록</div><div class="h2 m-0">{{ tot.registered }}</div></div></div></div>
+  <div class="col-6 col-md-2"><div class="card"><div class="card-body p-2"><div class="text-secondary small">실사용({{ days }}일)</div><div class="h2 m-0">{{ tot.in_use }}</div></div></div></div>
+  <div class="col-6 col-md-2"><div class="card"><div class="card-body p-2"><div class="text-secondary small">가용</div><div class="h2 m-0 text-success">{{ tot.available }}</div></div></div></div>
+  <div class="col-6 col-md-2"><div class="card"><div class="card-body p-2"><div class="text-secondary small">전체 사용률</div><div class="h2 m-0">{{ tot.util }}%</div></div></div></div>
+</div>
+<form method="get" class="row g-2 mb-2">
+  <div class="col-md-4"><input type="text" name="q" value="{{ q }}" class="form-control" placeholder="VLAN 번호·이름·설명·대역·소속 (포함 검색)"></div>
+  <div class="col-auto"><div class="input-group"><span class="input-group-text">실사용 기준</span><input type="number" name="days" value="{{ days }}" min="1" max="365" class="form-control" style="width:6em"><span class="input-group-text">일</span></div></div>
+  <input type="hidden" name="sort" value="{{ sort }}">
+  <div class="col-auto"><button class="btn btn-primary"><i class="mdi mdi-magnify"></i> 조회</button></div>
+</form>
+<div class="card">
+<div class="table-responsive">
+<table class="table table-hover table-sm mb-0 object-list">
+  <thead><tr>
+    {% for key, label, nextsort in cols %}
+      <th><a href="?q={{ q|urlencode }}&days={{ days }}&sort={{ nextsort }}">{{ label }}{% if sort == key %} ▲{% elif sort == '-'|add:key %} ▼{% endif %}</a></th>
+    {% endfor %}
+  </tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr>
+      <td>{{ r.vid|default:'—' }}</td>
+      <td>{{ r.vlan_name|default:'—' }}</td>
+      <td>{{ r.description|default:'—' }}</td>
+      <td><a href="{{ r.link_prefix }}">{{ r.prefix }}</a></td>
+      <td>{{ r.tenant|default:'—' }}</td>
+      <td>{{ r.gateway|default:'—' }}</td>
+      <td>{{ r.size }}</td>
+      <td><a href="{{ r.link_reg }}">{{ r.registered }}</a></td>
+      <td>{{ r.in_use }}</td>
+      <td><a href="{{ r.link_unseen }}" title="대장에 있지만 최근 안 보인 IP">{{ r.reg_unused }}</a></td>
+      <td><a href="{{ r.link_unreg }}" title="대장에 없는데 쓰는 IP (자동 발견)">{{ r.unreg_used }}</a></td>
+      <td class="fw-bold text-success">{{ r.available }}</td>
+      <td style="min-width:8em"><div class="progress" style="height:1.1rem"><div class="progress-bar bg-{{ r.bar }}" style="width:{{ r.util }}%">{{ r.util }}%</div></div></td>
+      <td>{{ r.l2_mac }}</td>
+      <td>{{ r.l2_switch }}</td>
+    </tr>
+  {% empty %}
+    <tr><td colspan="15" class="text-center text-secondary p-4">대역(프리픽스)이 없습니다. 엑셀 대장을 올리거나 '장비 등록(관리 IP)'으로 L3 장비를 등록하세요.</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+</div>
+{% endblock %}

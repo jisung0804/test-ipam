@@ -1,0 +1,34 @@
+{% extends 'generic/_base.html' %}
+{% block title %}장비 대사 결과·관리자 판정{% endblock %}
+{% block subtitle %}<div class="text-secondary">엑셀 대장(MAC·스위치·포트)과 실제 장비(ARP·MAC 테이블·인터페이스)를 5분마다 자동 비교한 결과입니다. 숫자를 누르면 해당 IP 목록이 열립니다.</div>{% endblock %}
+{% block content %}
+<div class="row">
+  <div class="col-md-6">
+    <div class="card"><div class="card-header"><h5 class="card-title m-0">① 자동 대사 결과</h5></div>
+      <table class="table table-hover mb-0">
+        {% for code, label, color, n, url in states %}
+          <tr><td><span class="badge text-bg-{{ color }}">{{ label }}</span></td><td class="text-end"><a href="{{ url }}" class="fw-bold">{{ n }}</a></td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+  <div class="col-md-6">
+    <div class="card"><div class="card-header"><h5 class="card-title m-0">② 관리자 판정</h5></div>
+      <table class="table table-hover mb-0">
+        <tr><td><span class="badge text-bg-secondary">미검토</span></td><td class="text-end"><a href="{{ ip_list }}?cf_review__empty=true" class="fw-bold">{{ unreviewed }}</a></td></tr>
+        {% for code, label, color, n, url in reviews %}
+          <tr><td><span class="badge text-bg-{{ color }}">{{ label }}</span></td><td class="text-end"><a href="{{ url }}" class="fw-bold">{{ n }}</a></td></tr>
+        {% endfor %}
+      </table>
+    </div>
+  </div>
+</div>
+<div class="card mt-3"><div class="card-body">
+  <h5>판정하는 방법</h5>
+  <ol class="mb-0">
+    <li>①의 숫자(예: MAC 불일치)를 눌러 IP 목록을 엽니다. <b>테이블 설정</b>에서 <i>대사 결과·관측 MAC·관측 위치·관리자 판정</i> 열을 켜 두면 대장 값과 관측 값을 나란히 볼 수 있습니다.</li>
+    <li>판정할 행을 체크 → 아래 <b>선택 항목 편집</b> → <i>관리자 판정</i>을 고르고(필요하면 <i>판정 메모</i>) 적용합니다.</li>
+    <li><b>도구 › 대사 판정 반영</b>을 실행하면 <i>대장 수정 필요</i>는 관측값으로 대장을 고치고, <i>회수 대상</i>은 격리, <i>삭제 대상</i>은 삭제합니다(먼저 커밋 없이 점검).</li>
+  </ol>
+</div></div>
+{% endblock %}

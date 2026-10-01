@@ -1,6 +1,7 @@
 from django.contrib import messages
 from django.contrib.auth.mixins import PermissionRequiredMixin
 from django.shortcuts import get_object_or_404, redirect
+from django.utils import timezone
 from django.views import View
 
 from netbox.views import generic
@@ -83,3 +84,66 @@ class DiscrepancyEditView(generic.ObjectEditView):
 @register_model_view(Discrepancy, 'delete')
 class DiscrepancyDeleteView(generic.ObjectDeleteView):
     queryset = Discrepancy.objects.all()
+
+
+# --------------------------------------------------------------------- IP 자원 현황
+from django.contrib.auth.mixins import LoginRequiredMixin  # noqa: E402
+from django.http import HttpResponse  # noqa: E402
+from django.shortcuts import render  # noqa: E402
+from django.urls import reverse  # noqa: E402
+from urllib.parse import urlencode  # noqa: E402
+
+
+class ResourcesView(LoginRequiredMixin, View):
+    """VLAN(대역)별 전체·대장·실사용·가용. ?q=검색어 &days=30 &sort=util &export=xlsx"""
+
+    def get(self, request):
+        from . import resources
+        from netbox.plugins import get_plugin_config
+        q = request.GET.get('q', '').strip()
+        try:
+            days = int(request.GET.get('days') or get_plugin_config('netbox_ip_request', 'recon_days') or 30)
+        except ValueError:
+            days = 30
+        sort = request.GET.get('sort', 'prefix')
+        rows, tot = resources.compute(days=days, q=q)
+        key = sort.lstrip('-')
+        if key in dict(resources.COLUMNS) or key == 'prefix':
+            import ipaddress
+            kf = (lambda r: ipaddress.ip_network(r['prefix'])) if key == 'prefix' else \
+                 (lambda r: (r[key] == '', r[key] if not isinstance(r[key], str) else r[key].lower()))
+            rows.sort(key=kf, reverse=sort.startswith('-'))
+        if request.GET.get('export') == 'xlsx':
+            resp = HttpResponse(resources.to_excel(rows),
+                                content_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+            resp['Content-Disposition'] = f'attachment; filename="ip_resources_{timezone.localdate():%Y%m%d}.xlsx"'
+            return resp
+        ip_list = reverse('ipam:ipaddress_list')
+        for r in rows:
+            base = {'parent': r['prefix']}
+            r['link_prefix'] = reverse('ipam:prefix', args=[r['pk']])
+            r['link_reg'] = f"{ip_list}?{urlencode(base)}"
+            r['link_unseen'] = f"{ip_list}?{urlencode({**base, 'cf_recon_state': 'unseen'})}"
+            r['link_unreg'] = f"{ip_list}?{urlencode({**base, 'cf_recon_state': 'discovered'})}"
+            r['bar'] = 'danger' if r['util'] >= 90 else 'warning' if r['util'] >= 70 else 'success'
+        cols = [(k, l, ('-' + k) if sort == k else k) for k, l in resources.COLUMNS]
+        return render(request, 'netbox_ip_request/resources.html', {
+            'rows': rows, 'tot': tot, 'q': q, 'days': days, 'sort': sort, 'cols': cols,
+            'export_qs': urlencode({'q': q, 'days': days, 'sort': sort, 'export': 'xlsx'}),
+        })
+
+
+class ReconSummaryView(LoginRequiredMixin, View):
+    """대사 결과·관리자 판정 건수 → 클릭하면 IP 주소 목록으로"""
+
+    def get(self, request):
+        from django.db.models import Count
+        from ipam.models import IPAddress
+        from .room_import import RECON_STATES, REVIEW_CHOICES
+        ip_list = reverse('ipam:ipaddress_list')
+        st = dict(IPAddress.objects.order_by().values_list('custom_field_data__recon_state').annotate(n=Count('id')))
+        rv = dict(IPAddress.objects.order_by().values_list('custom_field_data__review').annotate(n=Count('id')))
+        states = [(code, label, color, st.get(code, 0), f'{ip_list}?cf_recon_state={code}') for code, label, color in RECON_STATES]
+        reviews = [(code, label, color, rv.get(code, 0), f'{ip_list}?cf_review={code}') for code, label, color in REVIEW_CHOICES]
+        return render(request, 'netbox_ip_request/recon.html', {
+            'states': states, 'reviews': reviews, 'unreviewed': rv.get(None, 0), 'ip_list': ip_list})

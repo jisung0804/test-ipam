@@ -51,6 +51,33 @@ DRAG_JS = r"""
 """
 
 
+BULK_DELETE_TOP = r"""
+<button type="button" class="btn btn-red" id="ipam-top-delete" title="체크한 행 삭제 (아래 '선택 항목 삭제'와 같음)">
+  <i class="mdi mdi-trash-can-outline"></i> 선택 삭제 <span class="badge bg-white text-red ms-1" id="ipam-sel-count">0</span>
+</button>
+<script>
+(function () {
+  if (window.__ipamTopDel) return; window.__ipamTopDel = true;
+  function count() {
+    const all = document.querySelector('input[name="_all"]:checked');
+    const n = document.querySelectorAll('table.object-list input[name="pk"]:checked').length;
+    const el = document.getElementById('ipam-sel-count');
+    if (el) el.textContent = all ? '전체' : n;
+    return all ? 1 : n;
+  }
+  document.addEventListener('change', count);
+  document.addEventListener('htmx:afterSettle', count);
+  document.addEventListener('click', function (e) {
+    if (!e.target.closest('#ipam-top-delete')) return;
+    if (!count()) { alert('먼저 삭제할 행의 체크박스를 선택하세요. (머리글 체크박스 = 이 페이지 전체)'); return; }
+    const b = document.querySelector('button[name="_delete"]');
+    if (b) { b.disabled = false; b.click(); }
+  });
+})();
+</script>
+"""
+
+
 class DraggableColumns(PluginTemplateExtension):
     models = get_plugin_config('netbox_ip_request', 'draggable_tables') or ['ipam.ipaddress']
 
@@ -58,4 +85,19 @@ class DraggableColumns(PluginTemplateExtension):
         return DRAG_JS
 
 
-template_extensions = [DraggableColumns]
+class IPListExtras(PluginTemplateExtension):
+    models = ['ipam.ipaddress']
+
+    def list_buttons(self):
+        return BULK_DELETE_TOP
+
+
+class DeviceListExtras(PluginTemplateExtension):
+    models = ['dcim.device']
+
+    def list_buttons(self):
+        return ('<a href="/extras/scripts/" class="btn btn-teal" title="도구 > 장비 등록 (관리 IP만 입력)">'
+                '<i class="mdi mdi-lan-connect"></i> 관리 IP로 장비 등록</a>')
+
+
+template_extensions = [DraggableColumns, IPListExtras, DeviceListExtras]

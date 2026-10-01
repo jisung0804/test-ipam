@@ -10,4 +10,6 @@ urlpatterns = [
     path('requests/<int:pk>/<str:decision>/', views.IPRequestDecisionView.as_view(), name='iprequest_decide'),
     path('discrepancies/', include(get_model_urls('netbox_ip_request', 'discrepancy', detail=False))),
     path('discrepancies/<int:pk>/', include(get_model_urls('netbox_ip_request', 'discrepancy'))),
+    path('resources/', views.ResourcesView.as_view(), name='resources'),
+    path('recon/', views.ReconSummaryView.as_view(), name='recon'),
 ]

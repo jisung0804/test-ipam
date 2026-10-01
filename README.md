@@ -66,3 +66,10 @@ IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정을 NetBox�
 - 수집 때마다 대장에 없는 ARP IP를 '자동 발견' 태그로 등록(대역 없으면 /24 생성) — `logic.register_discovered`, 끄기 `IPAM_AUTO_REGISTER=0`
 - 사용자 정의 필드·태그는 migrate 직후 자동 생성(post_migrate)
 - `tools/snmp_bulk_config.py`: 수백 대 SNMPv3 계정 일괄 설정 (점검 → --limit 시범 → --apply, 백업·확인·결과 엑셀) — 검증 `tools/verify_bulk_config.py`(17항목)
+
+## 0.4.0 — 장비 연동 통합 운영
+- 관리 IP만으로 장비 등록·동기화: `inventory.py` (도구 1), 매일 재동기화 작업
+- 대사(엑셀↔ARP·MAC·인터페이스) 자동 결과 + 관리자 판정: `recon.py` (화면 'IP 신청 › 장비 대사 결과·판정', 도구 3)
+- IP 자원 현황(VLAN별)·엑셀 내보내기/VLAN 엑셀 업로드: `resources.py` (도구 2)
+- IP 빠른 검색 포함 검색(`contains_search`), IP 목록 위 '선택 삭제', 조건 일괄 삭제(도구 4)
+- 도구 스크립트: `scripts/ipam_tools.py` / 검증: `tools/verify_phase3.py`(46항목)

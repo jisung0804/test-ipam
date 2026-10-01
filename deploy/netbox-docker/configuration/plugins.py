@@ -30,6 +30,7 @@ PLUGINS_CONFIG = {
         'snmp_credentials': _snmp_credentials(),
         'snmp_interval': int(os.environ.get('IPAM_SNMP_INTERVAL', '5')),   # 분. 0 = 자동 수집 끔
         'snmp_concurrency': int(os.environ.get('IPAM_SNMP_CONCURRENCY', '20')),
+        'snmp_port': int(os.environ.get('IPAM_SNMP_PORT', '161')),
         'snmp_timeout': 2,
         'snmp_retries': 1,
         'snmp_mac_roles': ['access-switch'],   # 엑셀로 만든 스위치(역할 access-switch)는 태그 없이도 MAC 수집
@@ -51,6 +52,12 @@ PLUGINS_CONFIG = {
         },
         # 열 제목을 끌어서 순서를 바꿀 수 있는 목록 (다른 목록도 원하면 추가: 'ipam.prefix', 'dcim.device' 등)
         'draggable_tables': ['ipam.ipaddress'],
+        # IP 주소 빠른 검색을 '앞뒤 상관없이 포함' 검색으로 (False 면 NetBox 기본: 앞부분 일치)
+        'contains_search': True,
+        # 대사: 이 기간(일) 안에 ARP 에 안 보이면 '미관측', IP 자원 화면 '실사용' 기준
+        'recon_days': 30,
+        # 장비 인터페이스·VLAN·대역 SNMP 동기화 주기(분). 0 = 끔
+        'inventory_interval': 1440,
     }
 }
 

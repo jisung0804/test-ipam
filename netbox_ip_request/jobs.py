@@ -45,6 +45,8 @@ class SnmpCollectJob(JobRunner):
             tot['discovered'] = register_discovered()
             if tot['discovered']['created']:
                 tot['ports'] = check_ports()   # 새로 등록된 IP의 스위치·포트를 MAC 테이블로 채움
+        from .recon import reconcile
+        tot['recon'] = reconcile(days=get_plugin_config('netbox_ip_request', 'recon_days') or 30)
         tot['skipped'] = [f'{n}: {why}' for n, why in skipped]
         tot['errors'] = [f"{r['name']}({r['host']}): {r['error']}" for r in results if r['error']][:200]
         self.job.data = tot
@@ -54,3 +56,27 @@ class SnmpCollectJob(JobRunner):
 
 if _INTERVAL > 0:
     SnmpCollectJob = system_job(interval=_INTERVAL)(SnmpCollectJob)
+
+
+_INV = int(settings.PLUGINS_CONFIG.get('netbox_ip_request', {}).get('inventory_interval', 1440) or 0)
+
+
+class InventorySyncJob(JobRunner):
+    """등록된 장비 전체의 인터페이스(상태·설명)·VLAN·대역을 SNMP 로 다시 읽어 맞춤 (기본 하루 1회)"""
+
+    class Meta:
+        name = 'SNMP 장비 정보(인터페이스·VLAN) 동기화'
+
+    def run(self, *args, **kwargs):
+        from . import snmp
+        if not snmp.credentials():
+            self.job.data = {'skipped': 'SNMP 계정 미설정'}
+            return
+        from .inventory import sync_all
+        rows = sync_all()
+        self.job.data = {'devices': len(rows), 'failed': [r for r in rows if r[1] == '실패'][:200],
+                         'ok': sum(1 for r in rows if r[1] != '실패')}
+
+
+if _INV > 0:
+    InventorySyncJob = system_job(interval=_INV)(InventorySyncJob)

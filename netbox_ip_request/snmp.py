@@ -39,6 +39,19 @@ OID = {
     'qFdbStatus': '1.3.6.1.2.1.17.7.1.2.2.1.3',
     'qVlanFdbId': '1.3.6.1.2.1.17.7.1.4.2.1.3',  # dot1qVlanFdbId   [timeMark.vlan] = fdbId
     'ciscoVlan': '1.3.6.1.4.1.9.9.46.1.3.1.1.2',  # CISCO-VTP-MIB vtpVlanState [domain.vlan]
+    # ---- 장비 정보(인벤토리)
+    'ifType': '1.3.6.1.2.1.2.2.1.3',
+    'ifAdmin': '1.3.6.1.2.1.2.2.1.7',        # 1=up 2=down
+    'ifOper': '1.3.6.1.2.1.2.2.1.8',         # 1=up 2=down
+    'ifAlias': '1.3.6.1.2.1.31.1.1.1.18',    # 포트 설명(description)
+    'ifHighSpeed': '1.3.6.1.2.1.31.1.1.1.15',  # Mbps
+    'ipAdIf': '1.3.6.1.2.1.4.20.1.2',        # ipAdEntIfIndex [ip] = ifIndex
+    'ipAdMask': '1.3.6.1.2.1.4.20.1.3',      # ipAdEntNetMask [ip]
+    'qVlanName': '1.3.6.1.2.1.17.7.1.4.3.1.1',   # dot1qVlanStaticName [vid]
+    'ciscoVlanName': '1.3.6.1.4.1.9.9.46.1.3.1.1.4',  # vtpVlanName [domain.vid]
+    'entModel': '1.3.6.1.2.1.47.1.1.1.1.13',  # entPhysicalModelName
+    'entSerial': '1.3.6.1.2.1.47.1.1.1.1.11',  # entPhysicalSerialNum
+    'entClass': '1.3.6.1.2.1.47.1.1.1.1.5',    # 3=chassis
 }
 
 VENDORS = {9: 'Cisco', 2636: 'Juniper', 11: 'HP/Aruba(ProCurve)', 25506: 'HPE Comware(H3C)',
@@ -163,7 +176,7 @@ async def read_system(s):
         t = tuple(oid)
         if t[:6] == (1, 3, 6, 1, 4, 1) and len(t) > 6:
             ent = t[6]
-    return {'descr': str(descr or '')[:200], 'name': str(name or ''), 'enterprise': ent,
+    return {'descr': text(descr)[:200], 'name': text(name), 'enterprise': ent,
             'vendor': VENDORS.get(ent, f'기타({ent})' if ent else '알 수 없음')}
 
 
@@ -171,7 +184,7 @@ async def read_ifnames(s):
     names = await s.walk(OID['ifName'])
     if not names:
         names = await s.walk(OID['ifDescr'])
-    return {idx[0]: str(v) for idx, v in names.items()}
+    return {idx[0]: text(v) for idx, v in names.items()}
 
 
 async def read_arp(s, ifnames):
@@ -245,6 +258,56 @@ async def read_mac(s, ifnames, enterprise):
     return [r for r in rows if r[0]], 'BRIDGE-MIB'
 
 
+def text(v):
+    """장비가 보낸 문자열 디코딩: UTF-8 → (한글 장비 설정) CP949/EUC-KR → latin-1"""
+    if v is None:
+        return ''
+    b = v.asOctets() if hasattr(v, 'asOctets') else str(v).encode('latin-1', 'replace')
+    for enc in ('utf-8', 'cp949'):
+        try:
+            return b.decode(enc).strip('\x00 ')
+        except UnicodeDecodeError:
+            pass
+    return b.decode('latin-1').strip('\x00 ')
+
+
+async def read_inventory(s, ifnames):
+    """인터페이스(상태·설명·속도·종류), IP 주소(SVI), VLAN 이름, 모델·시리얼"""
+    def col(d):
+        return {idx[0]: v for idx, v in d.items() if len(idx) == 1}
+    typ, adm, opr = col(await s.walk(OID['ifType'])), col(await s.walk(OID['ifAdmin'])), col(await s.walk(OID['ifOper']))
+    ali, spd = col(await s.walk(OID['ifAlias'])), col(await s.walk(OID['ifHighSpeed']))
+    ifs = {}
+    for i, name in ifnames.items():
+        ifs[i] = {'name': name, 'type': int(typ.get(i, 1)), 'admin': int(adm.get(i, 1)) == 1,
+                  'oper': int(opr.get(i, 2)) == 1, 'alias': text(ali.get(i)), 'speed': int(spd.get(i, 0) or 0)}
+    addrs = []
+    ifx, msk = await s.walk(OID['ipAdIf']), await s.walk(OID['ipAdMask'])
+    for idx, v in ifx.items():
+        if len(idx) == 4:
+            ip = '.'.join(str(x) for x in idx)
+            m = msk.get(idx)
+            mask = str(ipaddress.IPv4Address(bytes(m.asOctets()))) if m is not None and hasattr(m, 'asOctets') else str(m or '255.255.255.255')
+            addrs.append((ip, mask, int(v)))
+    vlans = {idx[-1]: text(v) for idx, v in (await s.walk(OID['qVlanName'])).items() if idx}
+    if not vlans:
+        vlans = {idx[-1]: text(v) for idx, v in (await s.walk(OID['ciscoVlanName'])).items()
+                 if idx and not 1002 <= idx[-1] <= 1005}
+    model = serial = ''
+    try:
+        cls = {idx[0]: int(v) for idx, v in (await s.walk(OID['entClass'])).items() if len(idx) == 1}
+        mods = {idx[0]: text(v) for idx, v in (await s.walk(OID['entModel'])).items() if len(idx) == 1 and text(v)}
+        sers = {idx[0]: text(v) for idx, v in (await s.walk(OID['entSerial'])).items() if len(idx) == 1 and text(v)}
+        chassis = [i for i in sorted(cls) if cls[i] == 3] or sorted(mods)
+        for i in chassis:
+            if mods.get(i):
+                model, serial = mods[i].strip(), sers.get(i, '').strip()
+                break
+    except SnmpError:
+        pass
+    return {'interfaces': ifs, 'addrs': addrs, 'vlans': vlans, 'model': model, 'serial': serial}
+
+
 # --------------------------------------------------------------------- 장비 1대 / 전체
 def credentials():
     creds = [c for c in (cfg('snmp_credentials') or []) if c and c.get('user')]
@@ -279,6 +342,8 @@ async def poll_device(engine, dev, creds, what=('arp', 'mac')):
             res['arp'] = await read_arp(s, ifn)
         if 'mac' in what and dev.get('mac'):
             res['mac'], res['method'] = await read_mac(s, ifn, res['system']['enterprise'])
+        if 'inv' in what:
+            res['inv'] = await read_inventory(s, ifn)
     except SnmpError as e:
         res['error'] = f'수집 중 오류: {e}'
     res['secs'] = round(time.monotonic() - t0, 1)

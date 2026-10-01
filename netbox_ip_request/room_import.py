@@ -229,9 +229,24 @@ def _slug(prefix, text):
     return (prefix + '-' + text.encode().hex())[:100]
 
 
+# 장비 연동 대사(자동) + 관리자 판정(수동)용 필드. (이름, 라벨, 타입, 선택지, 그룹, 대상 모델)
+RECON_STATES = (('ok', '일치', 'green'), ('mac_diff', 'MAC 불일치', 'orange'), ('port_diff', '위치(포트) 불일치', 'orange'),
+                ('unseen', '미관측', 'gray'), ('discovered', '대장 없음(자동 발견)', 'purple'), ('conflict', 'IP 충돌', 'red'))
+REVIEW_CHOICES = (('confirmed', '정상 확인', 'green'), ('fix_ledger', '대장 수정 필요(관측값 반영)', 'blue'),
+                  ('reclaim', '회수 대상', 'orange'), ('delete', '삭제 대상', 'red'), ('ignore', '예외(무시)', 'gray'))
+EXTRA_FIELDS = [
+    ('recon_state', '대사 결과(자동)', 'select', RECON_STATES, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('obs_mac', '관측 MAC', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('obs_location', '관측 위치', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('review', '관리자 판정', 'select', REVIEW_CHOICES, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('review_note', '판정 메모', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('oper_status', '링크 상태', 'text', None, 'SNMP', ('dcim', 'interface')),
+]
+
+
 def ensure_custom_fields():
     from core.models import ObjectType
-    from extras.models import CustomField
+    from extras.models import CustomField, CustomFieldChoiceSet
     from ipam.models import IPAddress
     ip_type = ObjectType.objects.get_for_model(IPAddress)
     for name, label, typ, rel, group in CUSTOM_FIELDS:
@@ -246,6 +261,22 @@ def ensure_custom_fields():
             cf.save()
         if not cf.object_types.filter(pk=ip_type.pk).exists():
             cf.object_types.add(ip_type)
+    for name, label, typ, choices, group, target in EXTRA_FIELDS:
+        cf = CustomField.objects.filter(name=name).first()
+        if not cf:
+            cf = CustomField(name=name, label=label, type=typ, group_name=group,
+                             ui_editable='no' if name in ('recon_state', 'obs_mac', 'obs_location', 'oper_status') else 'yes')
+            if choices:
+                cs = CustomFieldChoiceSet.objects.filter(name=label).first()
+                if cs is None:
+                    cs = CustomFieldChoiceSet(name=label, extra_choices=[[c, l] for c, l, _ in choices])
+                    cs.full_clean(); cs.save()
+                cf.choice_set = cs
+            cf.full_clean(exclude=['object_types'])
+            cf.save()
+        ot = ObjectType.objects.get_by_natural_key(*target)
+        if not cf.object_types.filter(pk=ot.pk).exists():
+            cf.object_types.add(ot)
 
 
 _DNS = _re.compile(r'^([0-9A-Za-z_-]+|\*)(\.[0-9A-Za-z_-]+)*\.?$')
