@@ -1,0 +1,44 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row">
+  <div class="col col-md-7">
+    <div class="card">
+      <h2 class="card-header">신청 내용</h2>
+      <table class="table table-hover attr-table">
+        <tr><th>상태</th><td>{% badge object.get_status_display bg_color=object.get_status_color %}</td></tr>
+        <tr><th>신청자</th><td>{{ object.requester }}</td></tr>
+        <tr><th>부서</th><td>{{ object.tenant|linkify|placeholder }}</td></tr>
+        <tr><th>요청 대역</th><td>{{ object.prefix|linkify }}</td></tr>
+        <tr><th>MAC</th><td class="font-monospace">{{ object.mac|placeholder }}</td></tr>
+        <tr><th>호스트명</th><td>{{ object.hostname|placeholder }}</td></tr>
+        <tr><th>용도</th><td>{{ object.purpose }}</td></tr>
+        <tr><th>사용 기간</th><td>{% if object.period_days %}{{ object.period_days }}일{% else %}영구{% endif %}</td></tr>
+        <tr><th>발급 IP</th><td>{{ object.ip_address|linkify|placeholder }}</td></tr>
+        <tr><th>처리자</th><td>{{ object.approver|placeholder }}</td></tr>
+        <tr><th>반려 사유</th><td>{{ object.reason|placeholder }}</td></tr>
+      </table>
+    </div>
+    {% include 'inc/panels/tags.html' %}
+  </div>
+  <div class="col col-md-5">
+    {% if can_decide %}
+    <div class="card">
+      <h2 class="card-header">승인 / 반려</h2>
+      <div class="card-body">
+        <form method="post" action="{% url 'plugins:netbox_ip_request:iprequest_decide' pk=object.pk decision='approve' %}" class="mb-3">
+          {% csrf_token %}
+          <button type="submit" class="btn btn-success w-100">승인하고 IP 자동 발급</button>
+        </form>
+        <form method="post" action="{% url 'plugins:netbox_ip_request:iprequest_decide' pk=object.pk decision='reject' %}">
+          {% csrf_token %}
+          <input type="text" name="reason" class="form-control mb-2" placeholder="반려 사유 (필수)" required>
+          <button type="submit" class="btn btn-outline-danger w-100">반려</button>
+        </form>
+      </div>
+    </div>
+    {% endif %}
+    {% include 'inc/panels/comments.html' %}
+  </div>
+</div>
+{% endblock %}

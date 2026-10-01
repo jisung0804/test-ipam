@@ -1,0 +1,11 @@
+FROM docker.io/netboxcommunity/netbox:v4.7-5.1.1
+
+# 신청 플러그인 설치 (zip을 푼 폴더를 이미지에 복사해 설치)
+COPY ./netbox-ip-request /opt/netbox-ip-request
+RUN /usr/local/bin/uv pip install /opt/netbox-ip-request
+
+# 플러그인 정적 파일 수집 (빌드 시점용 임시 키 사용)
+COPY configuration/configuration.py /etc/netbox/config/configuration.py
+COPY configuration/plugins.py /etc/netbox/config/plugins.py
+RUN DEBUG="true" SECRET_KEY="dummydummydummydummydummydummydummydummydummydummy" \
+    /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py collectstatic --no-input

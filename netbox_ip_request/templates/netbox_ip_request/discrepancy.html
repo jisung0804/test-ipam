@@ -1,0 +1,13 @@
+{% extends 'generic/object.html' %}
+{% load helpers %}
+{% block content %}
+<div class="row"><div class="col col-md-7"><div class="card">
+  <h2 class="card-header">대장 불일치</h2>
+  <table class="table table-hover attr-table">
+    <tr><th>종류</th><td>{% badge object.get_kind_display bg_color=object.get_kind_color %}</td></tr>
+    <tr><th>IP</th><td class="font-monospace"><a href="{% url 'ipam:ipaddress_list' %}?q={{ object.ip }}">{{ object.ip }}</a></td></tr>
+    <tr><th>내용</th><td>{{ object.detail }}</td></tr>
+    <tr><th>해결</th><td>{% checkmark object.resolved %}</td></tr>
+  </table>
+</div></div></div>
+{% endblock %}

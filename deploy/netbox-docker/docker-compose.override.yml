@@ -1,0 +1,20 @@
+services:
+  netbox:
+    image: netbox:v4.7-ipreq
+    pull_policy: never
+    ports:
+      - "8000:8080"
+    build:
+      context: .
+      dockerfile: Dockerfile-Plugins
+    env_file:
+      - path: env/netbox.env
+      - path: env/ipam-snmp.env
+        required: false   # 없으면 SNMP 수집만 꺼진 상태로 동작
+  netbox-worker:
+    image: netbox:v4.7-ipreq
+    pull_policy: never
+    env_file:
+      - path: env/netbox.env
+      - path: env/ipam-snmp.env
+        required: false   # 없으면 SNMP 수집만 꺼진 상태로 동작

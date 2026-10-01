@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox-ip-request"
+version = "0.1.0"
+description = "NetBox plugin: IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정"
+requires-python = ">=3.12"
+dependencies = ["pandas", "openpyxl", "pysnmp>=7.1,<8", "cryptography"]  # 엑셀 이관 도구용
+
+[tool.setuptools.packages.find]
+include = ["netbox_ip_request*"]
+
+[tool.setuptools.package-data]
+netbox_ip_request = ["templates/netbox_ip_request/*.html"]
