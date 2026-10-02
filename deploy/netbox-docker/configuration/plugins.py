@@ -26,6 +26,16 @@ PLUGINS_CONFIG = {
         'arp_guard_days': 30,    # 최근 30일 ARP에 보인 IP는 할당 제외
         'dormant_days': 180,     # 장기 미사용 판정 기준
         'quarantine_days': 30,   # 회수 후 격리 기간
+
+        # ---- IP 신청·발급 ------------------------------------------------------------------------------
+        'alloc_host_min': 21,    # 자동 발급 범위: /24 대역 마지막 자리 21~252 (그 밖은 자동 발급 제외, 관리자 수동 지정은 가능)
+        'alloc_host_max': 252,
+        'default_period_days': 180,   # 신청 사용 기한(일). 신청자는 변경 불가, 관리자만 수정
+        'gateway_offset': 1,     # 대역에 '게이트웨이' IP 가 없을 때 안내 메일 gateway = 대역 시작 + 1
+        # 안내 메일의 DNS·문의처 — env/ipam-snmp.env 에 IPAM_DNS=1.1.1.1, 2.2.2.2 / IPAM_ADMIN_CONTACT=... 로 지정
+        'dns_servers': [x.strip() for x in os.environ.get('IPAM_DNS', '').split(',') if x.strip()],
+        'admin_contact': os.environ.get('IPAM_ADMIN_CONTACT', ''),
+        'mail_from': os.environ.get('IPAM_MAIL_FROM', ''),   # 비우면 env/netbox.env 의 EMAIL_FROM
         # ---- Phase 2: SNMPv3 자동 수집
         'snmp_credentials': _snmp_credentials(),
         'snmp_interval': int(os.environ.get('IPAM_SNMP_INTERVAL', '5')),   # 분. 0 = 자동 수집 끔
@@ -55,6 +65,7 @@ PLUGINS_CONFIG = {
         # IP 주소 빠른 검색을 '앞뒤 상관없이 포함' 검색으로 (False 면 NetBox 기본: 앞부분 일치)
         'contains_search': True,
         # 대사: 이 기간(일) 안에 ARP 에 안 보이면 '미관측', IP 자원 화면 '실사용' 기준
+        'l2_overwrite': True,   # 엑셀은 최초 값 — 실제 L2(SNMP)로 본 MAC·스위치·포트로 대장을 덮어씀 (False 면 대사 결과만 표시)
         'recon_days': 30,
         # 장비 인터페이스·VLAN·대역 SNMP 동기화 주기(분). 0 = 끔
         'inventory_interval': 1440,

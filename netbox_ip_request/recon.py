@@ -8,6 +8,10 @@ IP 주소마다 자동 판정(대사 결과)을 사용자 정의 필드에 적�
   대장 없음(자동 발견): 엑셀 대장에 없던 IP (수집으로 자동 등록됨)
   IP 충돌          : 같은 IP 를 여러 MAC 이 씀
 관측 MAC·관측 위치(스위치 포트 + 링크 상태 + 포트 설명 + VLAN)도 함께 적어 화면에서 대장 값과 나란히 비교한다.
+엑셀은 최초 데이터일 뿐이고 실제 L2 가 기준이다(l2_overwrite=True, 기본):
+  최근 1일 ARP 로 본 MAC 하나 + 액세스 스위치 MAC 테이블에서 본 포트가 있으면 대장의 MAC·스위치·포트를 그 값으로 덮어쓴다.
+  덮어쓴 행은 '데이터 기준' = L2로 덮어씀, 'L2 덮어쓴 내용' = 날짜: 이전→새 값, '엑셀 원본값' = 처음 덮어쓰기 전 엑셀 값.
+  '관리자 판정'이 예외(무시)인 IP 와 IP 충돌은 덮어쓰지 않는다.
 관리자는 '관리자 판정' 칸(정상 확인/대장 수정 필요/회수 대상/삭제 대상/예외)을 IP 목록의 '선택 항목 편집'으로 한꺼번에 정한다.
 """
 import datetime as dt
@@ -17,7 +21,7 @@ from django.db import connection
 from django.db.models import Count
 from django.utils import timezone
 
-from .logic import _same_port
+from .logic import _same_port, cfg
 from .models import ArpEntry, MacEntry
 
 
@@ -48,6 +52,10 @@ def reconcile(days=30, now=None):
         itfs.setdefault(i.device.name, []).append(i)
     dev_names = dict(Device.objects.values_list('pk', 'name'))
     port_names = {}
+    overwrite = cfg('l2_overwrite')
+    overwrite = True if overwrite is None else overwrite
+    fresh = now - dt.timedelta(days=1)
+    today = timezone.localdate(now).isoformat()
 
     def iface(dev, port):
         for i in itfs.get(dev, []):
@@ -99,9 +107,41 @@ def reconcile(days=30, now=None):
                         state = 'port_diff'
             else:
                 loc = f"(ARP: {macs[obs_mac].device} {macs[obs_mac].interface}, 스위치 포트 미확인)"
-        if 'ipam-discovered' in x['tags'] and state in ('ok', 'unseen'):
+        discovered = 'ipam-discovered' in x['tags']
+        if discovered and state in ('ok', 'unseen'):
             state = 'discovered'
         new = {'recon_state': state, 'obs_mac': obs_mac or None, 'obs_location': loc[:250] or None}
+        # ---- 실제 L2 를 기준으로 대장 덮어쓰기 (MAC·스위치·포트)
+        src = cf.get('data_source') or ('l2_new' if discovered else 'excel')
+        if (overwrite and obs_mac and state != 'conflict' and cf.get('review') != 'ignore'
+                and macs[obs_mac].last_seen >= fresh):
+            chg, upd = [], {}
+            if cf.get('host_mac') != obs_mac:
+                chg.append(f"MAC {cf.get('host_mac') or '(빈칸)'}→{obs_mac}")
+                upd['host_mac'] = obs_mac
+            i = iface(e.device, e.port) if e else None
+            if i is not None:
+                old_sw, old_port = cf.get('switch'), port_names.get(cf.get('switch_port'), '')
+                if old_sw != i.device_id:
+                    chg.append(f"스위치 {dev_names.get(old_sw) or '(빈칸)'}→{e.device}")
+                    upd['switch'] = i.device_id
+                if cf.get('switch_port') != i.pk:
+                    if old_sw != i.device_id or not (old_port and _same_port(old_port, i.name)):
+                        chg.append(f"포트 {old_port or '(빈칸)'}→{i.name}")
+                    upd['switch_port'] = i.pk          # 같은 포트의 다른 이름(엑셀 '1/0/5' ↔ 'Gi1/0/5')은 실제 포트로만 연결
+            if chg:
+                if not discovered and not cf.get('excel_orig') and src == 'excel':
+                    upd['excel_orig'] = (f"MAC {cf.get('host_mac') or '-'} · 스위치 {dev_names.get(cf.get('switch')) or '-'}"
+                                         f" · 포트 {port_names.get(cf.get('switch_port')) or '-'}")[:250]
+                upd['l2_changed'] = f"{today}: " + ' · '.join(chg)
+                src = 'l2_new' if discovered else 'l2_overwritten'
+                counts['overwritten'] = counts.get('overwritten', 0) + 1
+                if state in ('mac_diff', 'port_diff'):
+                    state = new['recon_state'] = 'ok'      # 덮어써서 이제 대장 = 실제
+            elif src == 'excel':
+                src = 'l2_same'
+            new.update(upd)
+        new['data_source'] = src
         if any(cf.get(k) != v for k, v in new.items()):
             out[pk] = new
         counts[state] = counts.get(state, 0) + 1

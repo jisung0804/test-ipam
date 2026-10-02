@@ -22,7 +22,7 @@ IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정을 NetBox�
 | `import_excel.py` | 엑셀 대장 검증(드라이런) → `--commit` 시 NetBox로 이관 |
 | `collector.py`, `netparse.py` | 장비 ARP/MAC 수집 → 플러그인 API 전송 (5분 cron) |
 | `import_room_excel.py` | 현행 호실 기준 대장(19개 컬럼) → NetBox 이관. 호실·스위치·포트까지 연결 (`--base 165.246` 등 앞 두 옥텟 지정) |
-| `verify_netbox.py` | 검증 스위트 51항목 (`python verify_netbox.py 5`) — **테스트 전용 NetBox에서만 실행: 전체 데이터를 지움** |
+| `verify_netbox.py` | 검증 스위트 62항목 (`python verify_netbox.py 5`) — **테스트 전용 NetBox에서만 실행: 전체 데이터를 지움** |
 | `mutate_netbox.py` | 방어 로직 제거 시 스위트가 잡는지 확인 |
 
 환경변수: `NETBOX_URL`, `NETBOX_TOKEN`, (수집기) `NET_USER`, `NET_PASS`
@@ -73,3 +73,28 @@ IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정을 NetBox�
 - IP 자원 현황(VLAN별)·엑셀 내보내기/VLAN 엑셀 업로드: `resources.py` (도구 2)
 - IP 빠른 검색 포함 검색(`contains_search`), IP 목록 위 '선택 삭제', 조건 일괄 삭제(도구 4)
 - 도구 스크립트: `scripts/ipam_tools.py` / 검증: `tools/verify_phase3.py`(46항목)
+
+## 0.5.0 — IP 신청·발급 개선 (Phase 4)
+- 신청서: 이름·소속·이메일·연락처 필수. 사용 기한 180일 고정(신청자는 변경 불가, 관리자만 수정)
+- 사용 위치: 사용자는 대역을 고르지 않고 건물(드롭다운)·호실번호만 적음(모르면 비움) → `match.py` 가 IP 대장에서
+  같은 호실 → 같은 층 → 같은 건물 → 대역/VLAN 설명 순으로 VLAN 대역을 찾아 넣음. 못 찾으면 '미정', 관리자가 선택
+- 자동 발급: /24 대역 마지막 자리 21~252 만 사용 (`alloc_host_min`/`alloc_host_max`), 최근 ARP 에 보인 IP 제외
+- 관리자: 신청 상세 화면에서 대역(VLAN) 변경 → 미리보기 → 자동 발급 / 수동 지정(범위 밖도 가능) 선택
+- 발급 완료 시 신청자 이메일로 안내 메일 자동 발송(실패해도 발급은 유지, 화면에서 재발송)
+  - 메일 서버: env/netbox.env 의 `EMAIL_SERVER`·`EMAIL_PORT`·`EMAIL_FROM` …
+  - 메일 내용: env/ipam-snmp.env 의 `IPAM_DNS`·`IPAM_ADMIN_CONTACT`(·`IPAM_MAIL_FROM`)
+- 엑셀은 최초 값: 수집(5분)마다 실제 L2(ARP·MAC 테이블)로 IP 의 MAC·스위치·포트를 덮어씀 (`l2_overwrite`, 기본 True)
+  - 사용자 정의 필드 '데이터 기준'(엑셀/L2 확인/L2로 덮어씀/L2 신규), 'L2 덮어쓴 내용', '엑셀 원본값' 으로 구별
+  - 엑셀을 다시 올려도 L2 로 확인된 MAC·스위치·포트는 되돌리지 않음
+- 검증: `tools/verify_phase4.py` (30항목), `verify_phase3.py` P3b (L2 덮어쓰기)
+
+## 운영 서버(CentOS) 이관 — deploy/centos/
+| 파일 | 실행 위치 | 용도 |
+|---|---|---|
+| `install_docker.sh` | 새 서버 | Docker CE·nginx·cron 등 설치 (CentOS Stream 9/10, Rocky/Alma 9) |
+| `export_old_server.sh` + `counts.sql` | 기존 서버(WSL) netbox-docker 폴더 | DB·업로드 파일·설정을 tar 하나로 (`--final` = 기존 서버 정지 유지) |
+| `restore_new_server.sh` | 새 서버 /opt/netbox-docker | 묶음(또는 백업 폴더) 복원 → 빌드 → 기동 → 건수 비교 |
+| `docker-compose.override.yml` | 새 서버 | 운영용: 8000 포트 127.0.0.1 전용, 자동 재시작 |
+| `nginx-netbox.conf` | 새 서버 /etc/nginx/conf.d/ | HTTPS 프록시 |
+| `backup.sh` | 새 서버 cron | 매일 DB·파일·설정 백업, 14일 보관 |
+| `post_check.sh` | 새 서버 | 이관 후 점검 (컨테이너·마이그레이션·포트·메일·백업) |

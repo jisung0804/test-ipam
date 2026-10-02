@@ -17,6 +17,8 @@ from netbox_ip_request import inventory, logic, recon, resources
 from netbox_ip_request.models import ArpEntry, Discrepancy, MacEntry
 
 R = {'p': 0, 'f': 0}
+from django.conf import settings as _S
+_S.PLUGINS_CONFIG['netbox_ip_request']['l2_overwrite'] = False    # P1~P3 은 덮어쓰기 끈 상태(판정 흐름), P3b 에서 켬
 
 
 def ok(c, n, x=''):
@@ -104,7 +106,7 @@ with transaction.atomic():
     bad, _ = inventory.onboard(['127.0.0.16'], site, ports={'127.0.0.16': 1161}, collect=False)
 ok(bad[0][1] == '실패' and '타임아웃' in bad[0][2], '응답 없는 IP는 실패 사유만 남김', bad)
 
-print('== P3 대사(자동) · 관리자 판정')
+print('== P3 대사(자동) · 관리자 판정  (자동 덮어쓰기 끔: l2_overwrite=False 일 때의 동작)')
 ArpEntry.objects.create(ip='165.246.49.77', mac='00:aa:00:00:00:01', device='core-ex9208', interface='irb.49',
                         first_seen=timezone.now(), last_seen=timezone.now())
 ArpEntry.objects.create(ip='165.246.49.77', mac='00:aa:00:00:00:02', device='core-ex9208', interface='irb.49',
@@ -141,6 +143,44 @@ ok(IPAddress.objects.get(address__net_host='165.246.49.40').status == 'quarantin
 ok(not IPAddress.objects.filter(address__net_host='165.246.49.99').exists(), '삭제 대상 → 삭제')
 recon.reconcile()
 ok(st('165.246.49.10')['recon_state'] == 'ok' and st('165.246.49.12')['recon_state'] == 'ok', '반영 후 다시 대사하면 일치')
+
+print('== P3b 실제 L2 기준 덮어쓰기 (l2_overwrite=True, 기본)')
+_S.PLUGINS_CONFIG['netbox_ip_request']['l2_overwrite'] = True
+for a in ('165.246.49.10', '165.246.49.12'):     # 엑셀 최초 값처럼 되돌려 둠
+    o = IPAddress.objects.get(address__net_host=a)
+    for k in ('data_source', 'l2_changed', 'excel_orig', 'review'):
+        o.custom_field_data[k] = None
+    o.save()
+o10 = IPAddress.objects.get(address__net_host='165.246.49.10')
+o10.custom_field_data.update({'switch': cis.pk, 'switch_port': g5.pk}); o10.save()       # 엑셀: Cisco Gi1/0/5 (실제는 Juniper ge-0/0/9)
+o12 = IPAddress.objects.get(address__net_host='165.246.49.12')
+o12.custom_field_data.update({'host_mac': '00:11:22:00:00:12'}); o12.save()              # 엑셀: 옛 MAC (실제 :99)
+o77 = IPAddress.objects.get(address__net_host='165.246.49.77')
+o77.custom_field_data.update({'host_mac': '00:aa:00:00:00:09'}); o77.save()
+c0 = ObjectChange.objects.count()
+cnt = recon.reconcile()
+c10, c12, c77, c30 = st('165.246.49.10'), st('165.246.49.12'), st('165.246.49.77'), st('165.246.49.30')
+ok(c10['switch'] == jx.pk and Interface.objects.get(pk=c10['switch_port']).name == 'ge-0/0/9' and c10['data_source'] == 'l2_overwritten',
+   '스위치·포트를 실제 L2 위치로 덮어씀 + 데이터 기준 = L2로 덮어씀', c10)
+ok('스위치 ' in (c10.get('l2_changed') or '') and '→sw-juniper' in c10['l2_changed'] and '포트 Gi1/0/5→ge-0/0/9' in c10['l2_changed'],
+   "'L2 덮어쓴 내용'에 날짜: 이전→새 값", c10.get('l2_changed'))
+ok('포트 Gi1/0/5' in (c10.get('excel_orig') or ''), "'엑셀 원본값'에 덮어쓰기 전 값 보존", c10.get('excel_orig'))
+ok(c12['host_mac'] == '00:11:22:00:00:99' and 'MAC 00:11:22:00:00:12→00:11:22:00:00:99' in (c12.get('l2_changed') or '')
+   and c12['recon_state'] == 'ok', 'MAC 을 실제 값으로 덮어씀 → 대사 결과 일치', c12)
+ok(c77['host_mac'] == '00:aa:00:00:00:09' and c77['recon_state'] == 'conflict' and not c77.get('l2_changed'), 'IP 충돌은 덮어쓰지 않음', c77)
+ok(c30.get('data_source') == 'excel' and not c30.get('l2_changed'), '안 보이는 IP 는 엑셀 값 그대로(데이터 기준 = 엑셀)', c30)
+ok(cnt.get('overwritten') == 2 and ObjectChange.objects.count() == c0, '덮어쓴 건수 2, 변경 이력 폭주 없음', (cnt, ObjectChange.objects.count() - c0))
+cnt2 = recon.reconcile()
+ok(not cnt2.get('overwritten') and st('165.246.49.10')['l2_changed'] == c10['l2_changed'], '다시 대사해도 추가 덮어쓰기 없음(멱등)', cnt2)
+o12 = IPAddress.objects.get(address__net_host='165.246.49.12')
+o12.custom_field_data.update({'host_mac': '00:11:22:00:00:55', 'review': 'ignore'}); o12.save()
+recon.reconcile()
+ok(st('165.246.49.12')['host_mac'] == '00:11:22:00:00:55', "관리자 판정 '예외(무시)' IP 는 덮어쓰지 않음")
+o12 = IPAddress.objects.get(address__net_host='165.246.49.12')
+o12.custom_field_data.update({'host_mac': '00:11:22:00:00:99', 'review': None, 'data_source': None, 'l2_changed': None}); o12.save()
+recon.reconcile()
+ok(st('165.246.49.12').get('data_source') == 'l2_same' and not st('165.246.49.12').get('l2_changed'),
+   "엑셀 값이 실제와 같으면 데이터 기준 = 'L2 확인', 덮어쓴 내용 없음", st('165.246.49.12'))
 
 print('== P4 IP 자원 현황 · VLAN 엑셀')
 rows_r, tot = resources.compute(days=30)

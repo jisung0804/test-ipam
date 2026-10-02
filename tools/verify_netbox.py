@@ -338,21 +338,25 @@ def n4_dormant():
 
 
 # ------------------------------------------------------------------ N5 신청 워크플로·권한
+WHO = {'requester_name': '홍길동', 'requester_dept': '정보통신처', 'requester_email': 'hong@inha.test',
+       'requester_phone': '032-860-0000', 'room': '9-101', 'room_name': '교수연구실'}
+
+
 def n5_workflow():
     p = prefix('10.50.0.0/28')  # 가용 14
     s = session()
-    r = s.post(api('/plugins/ip-request/requests/'), json={'prefix': p.pk, 'purpose': '개발 서버', 'mac': '00:50:56:cc:00:01'})
+    r = s.post(api('/plugins/ip-request/requests/'), json={'prefix': p.pk, 'purpose': '개발 서버', 'mac': '00:50:56:cc:00:01', **WHO})
     rid = r.json().get('id')
     check('N5.1 신청 접수, 신청자는 로그인 계정으로 자동 기록', r.status_code == 201 and r.json()['requester'] == 'admin', r.text[:200])
-    r = s.post(api('/plugins/ip-request/requests/'), json={'prefix': p.pk, 'purpose': '중복', 'mac': '00-50-56-CC-00-01'})
+    r = s.post(api('/plugins/ip-request/requests/'), json={'prefix': p.pk, 'purpose': '중복', 'mac': '00-50-56-CC-00-01', **WHO})
     check('N5.2 같은 MAC 진행 중 신청 중복 거부(표기 달라도)', r.status_code == 400, r.status_code)
     r = s.post(api(f'/plugins/ip-request/requests/{rid}/approve/'))
     check('N5.3 승인 → IP 자동 발급, 신청 상태 allocated', r.status_code == 200 and
           IPRequest.objects.get(pk=rid).status == 'allocated', r.text[:200])
     ip = IPAddress.objects.get(pk=r.json()['ip_id'])
     check('N5.4 발급 IP에 사용자·MAC·발급일 기록', ip.custom_field_data.get('host_mac') == '00:50:56:cc:00:01'
-          and ip.custom_field_data.get('ip_user') == 'admin' and ip.custom_field_data.get('assigned_on'))
-    r = s.post(api('/plugins/ip-request/requests/'), json={'prefix': p.pk, 'purpose': '추가', 'mac': '00:50:56:cc:00:01'})
+          and ip.custom_field_data.get('ip_user') == '홍길동' and ip.custom_field_data.get('assigned_on'))
+    r = s.post(api('/plugins/ip-request/requests/'), json={'prefix': p.pk, 'purpose': '추가', 'mac': '00:50:56:cc:00:01', **WHO})
     check('N5.5 이미 IP를 받은 MAC으로 재신청 거부', r.status_code == 400, r.status_code)
     r2 = IPRequest.objects.create(requester='x', prefix=p, purpose='반려 테스트')
     c1 = s.post(api(f'/plugins/ip-request/requests/{r2.pk}/reject/'), json={'reason': ''}).status_code
@@ -374,7 +378,7 @@ def n5_workflow():
     tok = Token(user=kim, version=1); tok.save()
     k = requests.Session(); k.headers.update({'Authorization': f'Token {tok.token}', 'Accept': 'application/json'})
     q = prefix('10.51.0.0/28')
-    r = k.post(api('/plugins/ip-request/requests/'), json={'prefix': q.pk, 'purpose': '일반 사용자 신청'})
+    r = k.post(api('/plugins/ip-request/requests/'), json={'prefix': q.pk, 'purpose': '일반 사용자 신청', **WHO})
     c = k.post(api(f"/plugins/ip-request/requests/{r.json().get('id')}/approve/")).status_code
     check('N5.8 일반 사용자: 신청 가능(201), 자기 신청 승인 불가(403)', r.status_code == 201 and c == 403, (r.status_code, c))
 

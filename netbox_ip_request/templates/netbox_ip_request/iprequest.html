@@ -2,39 +2,98 @@
 {% load helpers %}
 {% block content %}
 <div class="row">
-  <div class="col col-md-7">
+  <div class="col col-md-6">
     <div class="card">
       <h2 class="card-header">신청 내용</h2>
       <table class="table table-hover attr-table">
         <tr><th>상태</th><td>{% badge object.get_status_display bg_color=object.get_status_color %}</td></tr>
-        <tr><th>신청자</th><td>{{ object.requester }}</td></tr>
-        <tr><th>부서</th><td>{{ object.tenant|linkify|placeholder }}</td></tr>
-        <tr><th>요청 대역</th><td>{{ object.prefix|linkify }}</td></tr>
+        <tr><th>신청자</th><td>{{ object.requester_name|placeholder }} <span class="text-secondary">({{ object.requester }})</span></td></tr>
+        <tr><th>소속</th><td>{{ object.requester_dept|placeholder }}</td></tr>
+        <tr><th>이메일</th><td>{{ object.requester_email|placeholder }}</td></tr>
+        <tr><th>연락처</th><td>{{ object.requester_phone|placeholder }}</td></tr>
+        <tr><th>건물</th><td>{{ object.building|placeholder }}</td></tr>
+        <tr><th>호실</th><td>{{ object.room|placeholder }} {% if object.room_name %}· {{ object.room_name }}{% endif %}</td></tr>
+        <tr><th>발급 대역(VLAN)</th><td>{% if object.prefix %}{{ object.prefix|linkify }}{% if object.prefix.vlan %} · VLAN {{ object.prefix.vlan.vid }} {{ object.prefix.vlan.name }}{% endif %}{% else %}<span class="badge text-bg-warning">미정 — 관리자 선택</span>{% endif %}
+          {% if object.match_note %}<div class="text-secondary small">자동 매칭: {{ object.match_note }}</div>{% endif %}</td></tr>
         <tr><th>MAC</th><td class="font-monospace">{{ object.mac|placeholder }}</td></tr>
         <tr><th>호스트명</th><td>{{ object.hostname|placeholder }}</td></tr>
         <tr><th>용도</th><td>{{ object.purpose }}</td></tr>
-        <tr><th>사용 기간</th><td>{% if object.period_days %}{{ object.period_days }}일{% else %}영구{% endif %}</td></tr>
+        <tr><th>사용 기한</th><td>{% if object.period_days %}{{ object.period_days }}일{% else %}기한 없음{% endif %}{% if object.expires_on %} (만료 {{ object.expires_on|date:"Y-m-d" }}){% endif %}
+          <div class="text-secondary small">사용 기한은 180일로 고정되며, 변경은 관리자와 협의합니다.</div></td></tr>
         <tr><th>발급 IP</th><td>{{ object.ip_address|linkify|placeholder }}</td></tr>
         <tr><th>처리자</th><td>{{ object.approver|placeholder }}</td></tr>
-        <tr><th>반려 사유</th><td>{{ object.reason|placeholder }}</td></tr>
+        <tr><th>처리 메모</th><td>{{ object.reason|placeholder }}</td></tr>
+        <tr><th>안내 메일</th><td>{{ object.notify_result|placeholder }}{% if object.notified_at %} <span class="text-secondary">({{ object.notified_at|date:"Y-m-d H:i" }})</span>{% endif %}</td></tr>
       </table>
     </div>
     {% include 'inc/panels/tags.html' %}
   </div>
-  <div class="col col-md-5">
+  <div class="col col-md-6">
     {% if can_decide %}
     <div class="card">
-      <h2 class="card-header">승인 / 반려</h2>
+      <h2 class="card-header">발급 처리 (관리자)</h2>
       <div class="card-body">
+        <form method="get" class="mb-3">
+          <label class="form-label">발급 대역(VLAN) 선택·확인 <span class="text-secondary small">— 호실 {{ object.room|default:"(없음)" }}을 보고 판단해 고른 뒤 미리보기</span></label>
+          <div class="input-group">
+            <select name="prefix" class="form-select">
+              {% if not preview_prefix %}<option value="">-- 대역 선택 --</option>{% endif %}
+              {% if candidates %}<optgroup label="이 건물·호실이 쓰는 대역 (대장 IP 수)">
+                {% for p, n in candidates %}<option value="{{ p.pk }}" {% if p.pk == preview_prefix.pk %}selected{% endif %}>{{ p.prefix }}{% if p.vlan %} · VLAN {{ p.vlan.vid }} {{ p.vlan.name }}{% endif %} — {{ n }}개</option>{% endfor %}
+              </optgroup>{% endif %}
+              <optgroup label="전체 대역">
+              {% for p in all_prefixes %}
+                <option value="{{ p.pk }}" {% if p.pk == preview_prefix.pk %}selected{% endif %}>{{ p.prefix }}{% if p.vlan %} · VLAN {{ p.vlan.vid }} {{ p.vlan.name }}{% endif %}{% if p.description %} · {{ p.description }}{% endif %}</option>
+              {% endfor %}
+              </optgroup>
+            </select>
+            <button class="btn btn-outline-secondary">미리보기</button>
+          </div>
+        </form>
+        {% if object.match_note %}<div class="small text-secondary mb-2">자동 매칭: {{ object.match_note }}</div>{% endif %}
+        {% if preview_prefix %}
+        <div class="alert alert-info py-2 d-block">
+          <div><b>{{ preview_prefix.prefix }}</b> 자동 발급 범위(마지막 자리 {{ alloc_min }}~{{ alloc_max }}) 빈 IP <b>{{ free_ips|length }}</b>개
+          · 다음 자동 발급: <b>{{ next_ip|default:"없음" }}</b><br>
+          <span class="small">범위 밖 빈 IP {{ outside }}개(자동 발급 제외) · 최근 사용 중으로 보여 제외 {{ busy }}개</span></div>
+        </div>
         <form method="post" action="{% url 'plugins:netbox_ip_request:iprequest_decide' pk=object.pk decision='approve' %}" class="mb-3">
           {% csrf_token %}
-          <button type="submit" class="btn btn-success w-100">승인하고 IP 자동 발급</button>
+          <input type="hidden" name="prefix" value="{{ preview_prefix.pk }}">
+          <div class="mb-2">
+            <label class="me-3"><input type="radio" name="mode" value="auto" checked class="form-check-input"> 자동 발급 ({{ next_ip|default:"빈 IP 없음" }})</label>
+            <label><input type="radio" name="mode" value="manual" class="form-check-input"> 수동 지정</label>
+          </div>
+          <input type="text" name="ip" list="free-ips" class="form-control mb-2" placeholder="수동 지정 IP (예: {{ next_ip|default:'165.246.49.21' }}) — 범위 밖 IP도 관리자는 지정 가능">
+          <datalist id="free-ips">{% for ip in free_ips %}<option value="{{ ip }}">{% endfor %}</datalist>
+          <div class="row g-2 mb-2">
+            <div class="col-6"><div class="input-group"><span class="input-group-text">사용 기한</span><input type="number" name="period_days" value="{{ object.period_days|default_if_none:'' }}" min="1" max="3650" class="form-control"><span class="input-group-text">일</span></div></div>
+            <div class="col-6 pt-2"><label class="small"><input type="checkbox" name="force" class="form-check-input"> 최근 사용 중으로 보인 IP라도 발급</label></div>
+          </div>
+          <button type="submit" class="btn btn-success w-100">발급하고 안내 메일 보내기</button>
         </form>
+        {% else %}
+        <div class="alert alert-warning py-2 d-block mb-3">자동 매칭된 대역이 없습니다. 위에서 대역을 고르고 <b>미리보기</b>를 누르면 발급할 수 있습니다.</div>
+        {% endif %}
         <form method="post" action="{% url 'plugins:netbox_ip_request:iprequest_decide' pk=object.pk decision='reject' %}">
           {% csrf_token %}
           <input type="text" name="reason" class="form-control mb-2" placeholder="반려 사유 (필수)" required>
           <button type="submit" class="btn btn-outline-danger w-100">반려</button>
         </form>
+      </div>
+    </div>
+    {% endif %}
+    {% if mail_body %}
+    <div class="card">
+      <h2 class="card-header">발급 안내 메일 내용</h2>
+      <div class="card-body">
+        <div class="small text-secondary mb-1">제목: {{ mail_subject }} · 받는 사람: {{ object.requester_email }}</div>
+        <pre class="mb-2" style="white-space:pre-wrap">{{ mail_body }}</pre>
+        {% if can_resend %}
+        <form method="post" action="{% url 'plugins:netbox_ip_request:iprequest_decide' pk=object.pk decision='resend' %}">
+          {% csrf_token %}<button class="btn btn-outline-primary btn-sm">안내 메일 다시 보내기</button>
+        </form>
+        {% endif %}
       </div>
     </div>
     {% endif %}

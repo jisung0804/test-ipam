@@ -6,7 +6,7 @@ from rest_framework.views import APIView
 
 from netbox.api.viewsets import NetBoxModelViewSet
 
-from .. import logic
+from .. import filtersets, logic
 from ..models import Discrepancy, IPRequest
 from .serializers import DiscrepancySerializer, IPRequestSerializer
 
@@ -14,6 +14,7 @@ from .serializers import DiscrepancySerializer, IPRequestSerializer
 class IPRequestViewSet(NetBoxModelViewSet):
     queryset = IPRequest.objects.all()
     serializer_class = IPRequestSerializer
+    filterset_class = filtersets.IPRequestFilterSet
 
     def _need_change_perm(self, request):
         return request.user.has_perm('netbox_ip_request.change_iprequest')
@@ -42,6 +43,7 @@ class IPRequestViewSet(NetBoxModelViewSet):
 class DiscrepancyViewSet(NetBoxModelViewSet):
     queryset = Discrepancy.objects.all()
     serializer_class = DiscrepancySerializer
+    filterset_class = filtersets.DiscrepancyFilterSet
 
 
 class _CollectorView(APIView):

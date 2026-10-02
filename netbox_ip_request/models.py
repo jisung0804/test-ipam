@@ -28,19 +28,34 @@ class DiscrepancyKindChoices(ChoiceSet):
 
 
 class IPRequest(NetBoxModel):
-    requester = models.CharField(max_length=100)
+    requester = models.CharField(max_length=100, verbose_name='신청 계정')
+    requester_name = models.CharField(max_length=50, verbose_name='신청자 이름')
+    requester_dept = models.CharField(max_length=100, verbose_name='소속')
+    requester_email = models.EmailField(verbose_name='이메일', help_text='발급되면 이 주소로 IP 정보가 자동 발송됩니다')
+    requester_phone = models.CharField(max_length=30, verbose_name='연락처', help_text='예: 032-860-0000, 010-0000-0000')
+    building = models.ForeignKey('dcim.Location', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
+                                 verbose_name='건물')
+    room = models.CharField(max_length=50, blank=True, verbose_name='호실번호',
+                            help_text='예: 101 (건물을 고른 경우) 또는 9-101. 모르면 비워 두세요')
+    room_name = models.CharField(max_length=100, blank=True, verbose_name='호실명', help_text='예: 교수연구실')
     tenant = models.ForeignKey('tenancy.Tenant', on_delete=models.PROTECT, null=True, blank=True,
                                related_name='+', verbose_name='부서')
-    prefix = models.ForeignKey('ipam.Prefix', on_delete=models.PROTECT, related_name='+', verbose_name='요청 대역')
+    prefix = models.ForeignKey('ipam.Prefix', on_delete=models.PROTECT, null=True, blank=True, related_name='+',
+                               verbose_name='발급 대역(VLAN)', help_text='비우면 건물·호실로 자동 매칭, 못 찾으면 관리자가 선택')
+    match_note = models.CharField(max_length=200, blank=True, verbose_name='대역 자동 매칭')
     mac = models.CharField(max_length=17, null=True, blank=True, verbose_name='MAC')
     hostname = models.CharField(max_length=100, blank=True, verbose_name='호스트명')
     purpose = models.CharField(max_length=200, verbose_name='용도')
-    period_days = models.PositiveIntegerField(null=True, blank=True, verbose_name='사용 기간(일, 비우면 영구)')
+    period_days = models.PositiveIntegerField(default=180, null=True, blank=True, verbose_name='사용 기한(일)',
+                                              help_text='사용 기한은 180일로 고정됩니다. 변경이 필요하면 관리자와 협의하세요.')
     status = models.CharField(max_length=20, choices=RequestStatusChoices, default=RequestStatusChoices.SUBMITTED)
     approver = models.CharField(max_length=100, blank=True)
     reason = models.CharField(max_length=200, blank=True, verbose_name='반려 사유')
     ip_address = models.ForeignKey('ipam.IPAddress', on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='+', verbose_name='발급 IP')
+    expires_on = models.DateField(null=True, blank=True, verbose_name='사용 기한(만료일)')
+    notified_at = models.DateTimeField(null=True, blank=True, verbose_name='안내 메일 발송')
+    notify_result = models.CharField(max_length=300, blank=True, verbose_name='메일 발송 결과')
 
     class Meta:
         ordering = ('-pk',)
@@ -60,6 +75,17 @@ class IPRequest(NetBoxModel):
     def get_status_color(self):
         return RequestStatusChoices.colors.get(self.status)
 
+    def save(self, *args, **kwargs):
+        if self._state.adding:
+            from .match import full_room, match
+            self.room = full_room(self.building, self.room)
+            if self.prefix_id is None:       # 사용자는 대역을 고르지 않음 → 건물·호실로 매칭
+                r = match(self.building, self.room)
+                self.prefix, self.match_note = r['prefix'], r['note'][:200]
+                if self.building is None and r['building'] is not None:
+                    self.building = r['building']
+        super().save(*args, **kwargs)
+
     def clean(self):
         super().clean()
         from .logic import norm_mac, mac_in_use
@@ -69,6 +95,10 @@ class IPRequest(NetBoxModel):
             raise ValidationError({'mac': str(e)})
         if self._state.adding and self.mac and mac_in_use(self.mac):
             raise ValidationError({'mac': f'이 MAC은 이미 IP를 발급받았습니다: {mac_in_use(self.mac)}'})
+        if self.mac and self.status in ('submitted', 'approved'):
+            dup = IPRequest.objects.filter(mac=self.mac, status__in=['submitted', 'approved']).exclude(pk=self.pk).first()
+            if dup:
+                raise ValidationError({'mac': f'이 MAC으로 처리 중인 신청이 이미 있습니다: {dup} (중복 신청 불가)'})
 
 
 class Discrepancy(NetBoxModel):

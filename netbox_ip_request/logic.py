@@ -64,25 +64,77 @@ def _recently_seen(prefix, now):
             .extra(where=['ip << %s::cidr'], params=[str(prefix.prefix)]).values_list('ip', flat=True)}
 
 
+def in_alloc_range(prefix, ip):
+    """자동 발급 범위: /24 이상 대역은 마지막 자리 alloc_host_min~max(기본 21~252)만. /25 보다 작은 대역은 제한 없음."""
+    if IPNetwork(str(prefix.prefix)).prefixlen > 24:
+        return True
+    last = int(str(ip).split('.')[-1])
+    return (cfg('alloc_host_min') or 21) <= last <= (cfg('alloc_host_max') or 252)
+
+
+def _ip_fields(req=None, *, user_name='', tenant=None, mac=None, hostname='', purpose='', period_days=None, now=None):
+    """발급 IP 에 채울 값 (신청서 → 대장)"""
+    from dcim.models import Location
+    now = now or timezone.now()
+    cf = {'ip_user': user_name or None, 'host_mac': norm_mac(mac), 'assigned_on': now.date().isoformat(),
+          'expires_on': (now + dt.timedelta(days=period_days)).date().isoformat() if period_days else None}
+    extra = {'tenant': tenant, 'dns_name': hostname or '', 'description': (purpose or '')[:200], 'comments': ''}
+    if req is not None:
+        cf.update({'ip_user': req.requester_name or req.requester, 'manager_phone': req.requester_phone or None,
+                   'purpose': req.purpose or None})
+        loc = Location.objects.filter(name=req.room).first() if req.room else None
+        if loc:
+            cf['room'] = loc.pk
+        extra['description'] = (req.room_name or req.purpose or '')[:200]
+        extra['comments'] = f'IP 신청 {req} · 호실 {req.room} · {req.requester_dept} · {req.requester_email}'
+        if req.requester_dept and not tenant:
+            from tenancy.models import Tenant
+            from django.utils.text import slugify
+            t = Tenant.objects.filter(name=req.requester_dept[:100]).first()
+            if t is None:
+                t = Tenant(name=req.requester_dept[:100],
+                           slug=(slugify(req.requester_dept) or 'dept-' + req.requester_dept.encode().hex())[:100])
+                t.full_clean(); t.save()
+            extra['tenant'] = t
+    return cf, extra
+
+
+def _create_ip(prefix, ip, cf, extra):
+    obj = IPAddress(address=IPNetwork(f'{ip}/{IPNetwork(str(prefix.prefix)).prefixlen}'), vrf=prefix.vrf, status='active', **extra)
+    obj.custom_field_data.update({k: v for k, v in cf.items() if v is not None or k in ('host_mac', 'expires_on')})
+    obj.full_clean()
+    obj.save()
+    return obj
+
+
 def _allocate_locked(prefix, *, user_name, tenant=None, mac=None, hostname='', purpose='', period_days=None,
-                     now=None):
-    """호출자가 IP_LOCK + transaction을 잡은 상태에서만 호출."""
+                     now=None, req=None):
+    """호출자가 IP_LOCK + transaction을 잡은 상태에서만 호출. 발급 범위(21~252) 안에서 가장 앞의 빈 IP."""
     now = now or timezone.now()
     seen = _recently_seen(prefix, now)
+    cf, extra = _ip_fields(req, user_name=user_name, tenant=tenant, mac=mac, hostname=hostname, purpose=purpose,
+                           period_days=period_days, now=now)
+    for ip in prefix.get_available_ips():
+        if str(ip) in seen or not in_alloc_range(prefix, ip):
+            continue  # 네트워크에서 쓰이는 중이거나 발급 범위 밖
+        return _create_ip(prefix, ip, cf, extra)
+    raise AllocationError(f'{prefix}: 발급 범위({cfg("alloc_host_min")}~{cfg("alloc_host_max")}) 안에 할당 가능한 IP가 없습니다')
+
+
+def available_preview(prefix, limit=300, now=None):
+    """승인 화면용: (자동 발급 예정 IP, 범위 안 빈 IP 목록, 범위 밖 빈 IP 수, 최근 ARP 사용 중이라 제외된 수)"""
+    now = now or timezone.now()
+    seen = _recently_seen(prefix, now)
+    inside, outside, busy = [], 0, 0
     for ip in prefix.get_available_ips():
         if str(ip) in seen:
-            continue  # 대장엔 비었지만 네트워크에서 쓰이고 있는 IP
-        obj = IPAddress(address=IPNetwork(f'{ip}/{prefix.prefix.prefixlen}'), vrf=prefix.vrf, tenant=tenant,
-                        status='active', dns_name=hostname or '', description=purpose[:200])
-        obj.custom_field_data.update({
-            'ip_user': user_name, 'host_mac': norm_mac(mac),
-            'assigned_on': now.date().isoformat(),
-            'expires_on': (now + dt.timedelta(days=period_days)).date().isoformat() if period_days else None,
-        })
-        obj.full_clean()
-        obj.save()
-        return obj
-    raise AllocationError(f'{prefix}: 할당 가능한 IP가 없습니다')
+            busy += 1
+        elif in_alloc_range(prefix, ip):
+            if len(inside) < limit:
+                inside.append(str(ip))
+        else:
+            outside += 1
+    return (inside[0] if inside else None), inside, outside, busy
 
 
 def allocate(prefix, **kw):
@@ -92,19 +144,102 @@ def allocate(prefix, **kw):
 
 
 # --------------------------------------------------------------------- 신청 워크플로
-def approve(request_pk, approver, now=None):
-    """승인 = 할당. 한 트랜잭션: 할당 실패 시 승인도 롤백. 동시 승인은 1건만 성공."""
+def approve(request_pk, approver, now=None, prefix=None, ip=None, period_days=None, force=False):
+    """승인 = 발급. 한 트랜잭션: 발급 실패 시 승인도 롤백. 동시 승인은 1건만 성공.
+    관리자 옵션: prefix(신청 대역 변경 — VLAN 을 잘못 고른 경우), ip(수동 지정), period_days(기한 변경),
+                force(최근 ARP 에 보인 IP 라도 수동 발급)"""
+    now = now or timezone.now()
     with advisory_lock(IP_LOCK):
         with transaction.atomic():
             req = IPRequest.objects.select_for_update().get(pk=request_pk)
             if req.status != RequestStatusChoices.SUBMITTED:
                 raise AllocationError(f'{req}: 이미 처리된 신청입니다({req.get_status_display()})')
             req.snapshot()
-            ip = _allocate_locked(req.prefix, user_name=req.requester, tenant=req.tenant, mac=req.mac,
-                                  hostname=req.hostname, purpose=req.purpose, period_days=req.period_days, now=now)
-            req.status, req.approver, req.ip_address = RequestStatusChoices.ALLOCATED, approver, ip
+            if prefix is not None and prefix.pk != req.prefix_id:
+                req.reason = (f'대역 변경: {req.prefix} → {prefix}' if req.prefix_id else f'대역 선택(관리자): {prefix}')[:200]
+                req.prefix = prefix
+            if req.prefix_id is None:
+                raise AllocationError('발급할 대역(VLAN)이 정해지지 않았습니다 — 관리자가 대역을 선택하세요')
+            if period_days is not None:
+                req.period_days = period_days
+            if ip:
+                obj = _manual_locked(req, str(ip).strip(), now, force)
+            else:
+                obj = _allocate_locked(req.prefix, user_name=req.requester_name or req.requester, mac=req.mac,
+                                       hostname=req.hostname, purpose=req.purpose, period_days=req.period_days,
+                                       now=now, req=req)
+            req.status, req.approver, req.ip_address = RequestStatusChoices.ALLOCATED, approver, obj
+            req.expires_on = (now + dt.timedelta(days=req.period_days)).date() if req.period_days else None
             req.save()
-            return ip
+            transaction.on_commit(lambda: notify(req.pk))   # 커밋된 뒤에만 메일 (롤백되면 안 보냄)
+            return obj
+
+
+def _manual_locked(req, ip, now, force):
+    import ipaddress as _ipa
+    try:
+        a = _ipa.ip_address(ip.split('/')[0])
+    except ValueError:
+        raise AllocationError(f'IP 형식 오류: {ip}')
+    net = _ipa.ip_network(str(req.prefix.prefix))
+    if a not in net:
+        raise AllocationError(f'{a} 는 대역 {req.prefix} 밖입니다')
+    if net.prefixlen < 31 and a in (net.network_address, net.broadcast_address):
+        raise AllocationError(f'{a}: 네트워크/브로드캐스트 주소는 발급할 수 없습니다')
+    exist = IPAddress.objects.filter(address__net_host=str(a)).first()
+    if exist:
+        raise AllocationError(f'{a} 는 이미 대장에 있습니다 ({exist.status}, {exist.description or "-"})')
+    if not force and str(a) in _recently_seen(req.prefix, now):
+        raise AllocationError(f'{a} 는 최근 {cfg("arp_guard_days")}일 안에 네트워크에서 사용 중으로 관측됐습니다. '
+                              f'그래도 발급하려면 \'사용 중이어도 발급\'을 체크하세요')
+    cf, extra = _ip_fields(req, mac=req.mac, hostname=req.hostname, purpose=req.purpose,
+                           period_days=req.period_days, now=now)
+    return _create_ip(req.prefix, str(a), cf, extra)
+
+
+def gateway_of(prefix):
+    g = IPAddress.objects.filter(address__net_host_contained=str(prefix.prefix), description__startswith='게이트웨이').first()
+    if g:
+        return str(g.address.ip)
+    return str(IPNetwork(str(prefix.prefix)).network + (cfg('gateway_offset') or 1))
+
+
+def mail_text(req):
+    ip = req.ip_address
+    net = IPNetwork(str(req.prefix.prefix))
+    dns = ', '.join(cfg('dns_servers') or []) or '관리자에게 문의'
+    exp = f"{req.expires_on:%Y-%m-%d} ({req.period_days}일)" if req.expires_on else '기한 없음'
+    lines = ['IP 발급 요청이 처리되었습니다. 해당 호실에서 아래 IP 주소를 사용하면 됩니다', '',
+             f'호실번호 : {req.room or "-"}', f'호실명 : {req.room_name or "-"}',
+             f'사용자 : {req.requester_name or req.requester}', f'연락처 : {req.requester_phone or "-"}',
+             f'사용기한 : {exp}', f'IP 주소 : {ip.address.ip if ip else "-"}',
+             f'subnetmask : {net.netmask}', f'gateway : {gateway_of(req.prefix)}', f'DNS : {dns}', '',
+             (f'※ 사용 기한은 {req.period_days}일입니다. 연장이나 변경이 필요하면 관리자와 협의하세요.' if req.period_days
+              else '※ 사용 기한 없음. 사용을 마치면 관리자에게 알려 주세요.')]
+    if cfg('admin_contact'):
+        lines.append(f'※ 문의: {cfg("admin_contact")}')
+    lines.append(f'(신청번호 {req})')
+    subject = f'[IP 발급] {ip.address.ip if ip else ""} 발급 완료 - {req.room or ""} {req.requester_name or ""}'.strip()
+    return subject, '\n'.join(lines)
+
+
+def notify(req_pk):
+    """발급 안내 메일. 실패해도 발급은 유지하고 결과만 기록."""
+    from django.core.mail import send_mail
+    req = IPRequest.objects.select_related('prefix', 'ip_address').get(pk=req_pk)
+    if not req.requester_email or not req.ip_address:
+        IPRequest.objects.filter(pk=req_pk).update(notify_result='이메일 주소 또는 발급 IP 없음 — 발송 안 함')
+        return False
+    subject, body = mail_text(req)
+    try:
+        from django.conf import settings
+        sender = cfg('mail_from') or getattr(settings, 'SERVER_EMAIL', None) or None   # NetBox EMAIL['FROM_EMAIL']
+        send_mail(subject, body, sender, [req.requester_email], fail_silently=False)
+        IPRequest.objects.filter(pk=req_pk).update(notified_at=timezone.now(), notify_result=f'발송 완료 → {req.requester_email}')
+        return True
+    except Exception as e:
+        IPRequest.objects.filter(pk=req_pk).update(notify_result=f'발송 실패: {type(e).__name__}: {e}'[:300])
+        return False
 
 
 def reject(request_pk, approver, reason):

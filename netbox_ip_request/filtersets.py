@@ -13,8 +13,13 @@ class IPRequestFilterSet(NetBoxModelFilterSet):
         fields = ('id', 'status', 'requester', 'mac')
 
     def search(self, queryset, name, value):
-        return queryset.filter(requester__icontains=value) | queryset.filter(mac__icontains=value) | \
-            queryset.filter(hostname__icontains=value)
+        from django.db.models import Q
+        v = value.strip()
+        return queryset.filter(Q(requester__icontains=v) | Q(requester_name__icontains=v) | Q(requester_dept__icontains=v)
+                               | Q(requester_email__icontains=v) | Q(requester_phone__icontains=v) | Q(room__icontains=v)
+                               | Q(room_name__icontains=v) | Q(mac__icontains=v) | Q(hostname__icontains=v)
+                               | Q(purpose__icontains=v) | Q(notify_result__icontains=v)
+                               | Q(match_note__icontains=v) | Q(building__name__icontains=v))
 
 
 class DiscrepancyFilterSet(NetBoxModelFilterSet):

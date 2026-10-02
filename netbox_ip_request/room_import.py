@@ -234,6 +234,11 @@ RECON_STATES = (('ok', '일치', 'green'), ('mac_diff', 'MAC 불일치', 'orange
                 ('unseen', '미관측', 'gray'), ('discovered', '대장 없음(자동 발견)', 'purple'), ('conflict', 'IP 충돌', 'red'))
 REVIEW_CHOICES = (('confirmed', '정상 확인', 'green'), ('fix_ledger', '대장 수정 필요(관측값 반영)', 'blue'),
                   ('reclaim', '회수 대상', 'orange'), ('delete', '삭제 대상', 'red'), ('ignore', '예외(무시)', 'gray'))
+# 데이터 기준: 엑셀은 최초 값, 이후 SNMP 로 본 실제 L2(MAC·스위치·포트)가 기준 — recon.reconcile 이 덮어씀
+SOURCE_CHOICES = (('excel', '엑셀(L2 미확인)', 'gray'), ('l2_same', 'L2 확인(엑셀과 같음)', 'green'),
+                  ('l2_overwritten', 'L2로 덮어씀', 'blue'), ('l2_new', 'L2 신규(엑셀 없음)', 'purple'))
+L2_SOURCES = ('l2_same', 'l2_overwritten', 'l2_new')
+L2_FIELDS = ('host_mac', 'switch', 'switch_port')
 EXTRA_FIELDS = [
     ('recon_state', '대사 결과(자동)', 'select', RECON_STATES, '대사(장비 연동)', ('ipam', 'ipaddress')),
     ('obs_mac', '관측 MAC', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
@@ -241,6 +246,9 @@ EXTRA_FIELDS = [
     ('review', '관리자 판정', 'select', REVIEW_CHOICES, '대사(장비 연동)', ('ipam', 'ipaddress')),
     ('review_note', '판정 메모', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
     ('oper_status', '링크 상태', 'text', None, 'SNMP', ('dcim', 'interface')),
+    ('data_source', '데이터 기준', 'select', SOURCE_CHOICES, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('l2_changed', 'L2 덮어쓴 내용', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
+    ('excel_orig', '엑셀 원본값', 'text', None, '대사(장비 연동)', ('ipam', 'ipaddress')),
 ]
 
 
@@ -265,7 +273,8 @@ def ensure_custom_fields():
         cf = CustomField.objects.filter(name=name).first()
         if not cf:
             cf = CustomField(name=name, label=label, type=typ, group_name=group,
-                             ui_editable='no' if name in ('recon_state', 'obs_mac', 'obs_location', 'oper_status') else 'yes')
+                             ui_editable='no' if name in ('recon_state', 'obs_mac', 'obs_location', 'oper_status', 'data_source',
+                                                         'l2_changed', 'excel_orig') else 'yes')
             if choices:
                 cs = CustomFieldChoiceSet.objects.filter(name=label).first()
                 if cs is None:
@@ -429,6 +438,13 @@ def commit(rows, site_name, update_existing=False, log=print, mode=None):
                 counts['skipped'] += 1
                 continue
             o.snapshot()
+            # 엑셀은 최초 데이터일 뿐 — 이미 실제 L2(SNMP) 값으로 확인·덮어쓴 MAC·스위치·포트는 엑셀로 되돌리지 않는다
+            if (o.custom_field_data or {}).get('data_source') in L2_SOURCES:
+                for k in L2_FIELDS:
+                    cf.pop(k, None)
+                counts['l2_kept'] += 1
+            elif not (o.custom_field_data or {}).get('data_source'):
+                cf['data_source'] = 'excel'
             if mode == 'merge':
                 _merge_into(o, tenants.get(x['dept']), host, desc, note, cf)
                 kind = 'merged'
@@ -439,6 +455,7 @@ def commit(rows, site_name, update_existing=False, log=print, mode=None):
         else:
             o = IPAddress(address=IPNetwork(f"{x['ip']}/24"), status='active')
             o.tenant, o.dns_name, o.description, o.comments = tenants.get(x['dept']), host, desc, note
+            cf['data_source'] = 'excel'
             o.custom_field_data.update(cf)
             kind = 'created'
         try:

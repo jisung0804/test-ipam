@@ -103,5 +103,16 @@ ok(c3['updated'] == 1 and o.description == '신규실' and o.dns_name == 'pc-new
 with transaction.atomic():
     c4 = R.commit(rep2['rows'], 'LENIENT-SITE', mode='skip', log=lambda m: None)
 ok(c4['skipped'] == 1, '건너뜀: 기존 IP 그대로')
+print('== 엑셀은 최초 값: L2 로 확인·덮어쓴 MAC·스위치·포트는 엑셀 재업로드로 되돌리지 않음')
+ok(h.custom_field_data.get('data_source') == 'excel', "엑셀로 새로 만든 IP 의 데이터 기준 = 'excel'", h.custom_field_data.get('data_source'))
+o.refresh_from_db()
+o.custom_field_data.update({'data_source': 'l2_overwritten', 'host_mac': '00:aa:bb:cc:dd:ee', 'switch': None, 'switch_port': None})
+o.save()
+with transaction.atomic():
+    c5 = R.commit(rep2['rows'], 'LENIENT-SITE', mode='overwrite', log=lambda m: None)
+o.refresh_from_db()
+ok(c5['l2_kept'] == 1 and o.custom_field_data['host_mac'] == '00:aa:bb:cc:dd:ee' and o.custom_field_data['data_source'] == 'l2_overwritten',
+   '덮어쓰기 모드여도 L2 값(MAC) 유지', (dict(c5), o.custom_field_data.get('host_mac')))
+ok(o.dns_name == 'pc-new' and o.custom_field_data['ip_user'] == '홍', 'L2 와 무관한 칸(호스트·관리자 등)은 엑셀대로 반영', (o.dns_name, o.custom_field_data['ip_user']))
 cleanup()
 print(f"\n결과: PASS {R_['p']} / FAIL {R_['f']}")

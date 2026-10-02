@@ -23,9 +23,27 @@ class IPRequestView(generic.ObjectView):
     queryset = IPRequest.objects.all()
 
     def get_extra_context(self, request, instance):
-        return {'reject_form': forms.RejectForm(),
-                'can_decide': request.user.has_perm('netbox_ip_request.change_iprequest')
-                and instance.status == 'submitted'}
+        can = request.user.has_perm('netbox_ip_request.change_iprequest')
+        ctx = {'reject_form': forms.RejectForm(), 'can_decide': can and instance.status == 'submitted',
+               'can_resend': can and instance.status == 'allocated'}
+        if ctx['can_decide']:
+            from ipam.models import Prefix
+            from .match import match
+            pfx = instance.prefix
+            if request.GET.get('prefix'):   # 승인 화면에서 대역을 고르거나 바꿔 미리보기
+                pfx = Prefix.objects.filter(pk=request.GET['prefix']).first() or pfx
+            m = match(instance.building, instance.room)       # 관리자 판단용: 이 건물·호실이 쓰는 대역 후보
+            cands = [(p, n) for p, n in m['candidates']]
+            ctx.update({'approve_form': forms.ApproveForm(initial={'prefix': pfx, 'period_days': instance.period_days}),
+                        'preview_prefix': pfx, 'candidates': cands,
+                        'all_prefixes': Prefix.objects.filter(vrf__isnull=True).select_related('vlan').order_by('prefix'),
+                        'alloc_min': logic.cfg('alloc_host_min'), 'alloc_max': logic.cfg('alloc_host_max')})
+            if pfx is not None:
+                nxt, free, outside, busy = logic.available_preview(pfx)
+                ctx.update({'next_ip': nxt, 'free_ips': free, 'outside': outside, 'busy': busy})
+        if instance.status == 'allocated' and instance.ip_address:
+            ctx['mail_subject'], ctx['mail_body'] = logic.mail_text(instance)
+        return ctx
 
 
 @register_model_view(IPRequest, 'add', detail=False)
@@ -52,8 +70,26 @@ class IPRequestDecisionView(PermissionRequiredMixin, View):
         req = get_object_or_404(IPRequest, pk=pk)
         try:
             if decision == 'approve':
-                ip = logic.approve(req.pk, request.user.username)
-                messages.success(request, f'{req} 승인 — {ip} 발급')
+                f = forms.ApproveForm(request.POST)
+                if not f.is_valid():
+                    messages.error(request, f'입력 확인: {f.errors.as_text()}')
+                    return redirect(req.get_absolute_url())
+                d = f.cleaned_data
+                if d.get('prefix') is None and req.prefix_id is None:
+                    messages.error(request, '발급할 대역(VLAN)을 먼저 고르고 [미리보기]를 누르세요')
+                    return redirect(req.get_absolute_url())
+                if d['mode'] == 'manual' and not (d.get('ip') or '').strip():
+                    messages.error(request, '수동 지정을 골랐다면 IP를 입력하세요')
+                    return redirect(req.get_absolute_url())
+                ip = logic.approve(req.pk, request.user.username, prefix=d['prefix'],
+                                   ip=d['ip'] if d['mode'] == 'manual' else None,
+                                   period_days=d.get('period_days'), force=d.get('force', False))
+                req.refresh_from_db()
+                messages.success(request, f'{req} 발급 완료 — {ip}. 안내 메일: {req.notify_result or "발송 대기"}')
+            elif decision == 'resend':
+                ok = logic.notify(req.pk)
+                req.refresh_from_db()
+                (messages.success if ok else messages.error)(request, f'안내 메일: {req.notify_result}')
             else:
                 form = forms.RejectForm(request.POST)
                 logic.reject(req.pk, request.user.username, form.data.get('reason', ''))

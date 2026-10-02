@@ -1,0 +1,32 @@
+# 운영(CentOS) 용 override — 개발용(deploy/netbox-docker/docker-compose.override.yml) 대신 이 파일을 쓴다
+#  - 8000 포트는 서버 자신(127.0.0.1)에서만 열림 → 외부 접속은 nginx(443)를 거침
+#    (Docker 가 연 포트는 firewalld 를 우회하므로, 0.0.0.0 으로 열면 방화벽 설정과 상관없이 외부에 노출됨)
+#  - 서버 재부팅 후 자동 기동 (restart: unless-stopped)
+services:
+  netbox:
+    image: netbox:v4.7-ipreq
+    pull_policy: never
+    ports:
+      - "127.0.0.1:8000:8080"
+    build:
+      context: .
+      dockerfile: Dockerfile-Plugins
+    env_file:
+      - path: env/netbox.env
+      - path: env/ipam-snmp.env
+        required: false
+    restart: unless-stopped
+  netbox-worker:
+    image: netbox:v4.7-ipreq
+    pull_policy: never
+    env_file:
+      - path: env/netbox.env
+      - path: env/ipam-snmp.env
+        required: false
+    restart: unless-stopped
+  postgres:
+    restart: unless-stopped
+  redis:
+    restart: unless-stopped
+  redis-cache:
+    restart: unless-stopped
