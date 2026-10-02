@@ -25,7 +25,13 @@ dnf config-manager --add-repo "$REPO" 2>/dev/null || dnf config-manager addrepo 
 echo "[4/5] Docker CE 설치"
 dnf -y install docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
 systemctl enable --now docker
-[ -n "${SUDO_USER:-}" ] && usermod -aG docker "$SUDO_USER" && echo "  $SUDO_USER 를 docker 그룹에 추가 (다시 로그인해야 적용)"
+U=${SUDO_USER:-$(logname 2>/dev/null || true)}
+if [ -n "$U" ] && [ "$U" != root ]; then
+  usermod -aG docker "$U"
+  echo "  $U 를 docker 그룹에 추가 — SSH 를 완전히 끊고 다시 접속해야 적용 (확인: id 명령에 docker 가 보여야 함)"
+else
+  echo "  ※ 일반 계정을 찾지 못해 docker 그룹 추가를 건너뜀 → sudo usermod -aG docker <계정> 을 직접 실행"
+fi
 
 echo "[5/5] 확인"
 docker --version; docker compose version
