@@ -24,11 +24,11 @@ def ok(c, n, x=''):
     print(('  PASS ' if c else '  FAIL ') + n + ('' if c else f'  [{str(x)[:400]}]'))
 
 
-print('== 0. 초기화 (reset_data.py)')
+print('== 0. 초기화 (reset_data_fast.py)')
 users_before = User.objects.count()
 IPAddress.objects.create(address='10.99.0.1/24', description='초기화 전 잔여 데이터')
 os.environ['CONFIRM'] = 'DELETE-ALL'
-exec(open(f'{HERE}/deploy/centos/reset_data.py').read())
+exec(open(f'{HERE}/deploy/centos/reset_data_fast.py').read())
 os.environ.pop('CONFIRM')
 ok(IPAddress.objects.count() == 0 and Device.objects.count() == 0 and Prefix.objects.count() == 0 and VLAN.objects.count() == 0,
    'IP·장비·대역·VLAN 모두 0건', (IPAddress.objects.count(), Device.objects.count(), Prefix.objects.count()))

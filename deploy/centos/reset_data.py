@@ -5,6 +5,8 @@
 남기는 것 : 사용자·그룹·권한·API 토큰, 업로드한 스크립트, 사용자 정의 필드, 태그, 사이트, 장비 종류·제조사·역할
 선택      : PURGE_CHANGELOG=1 이면 변경 로그도 비운다
 
+※ 데이터가 많으면 몇 시간 걸린다 — 빠른 방식은 reset_data_fast.py (몇 초)
+
 실행 (/opt/netbox-docker, 5분 수집 작업이 끼어들지 않게 작업자를 먼저 멈춘다):
   docker compose stop netbox-worker
   # ① 건수만 보기 (아무것도 지우지 않음)
