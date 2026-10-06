@@ -1,5 +1,5 @@
 """snmp_bulk_config.py 검증 — 실제 장비 대신 가짜 SSH 연결 + SNMP 시뮬레이터 사용 (개발용)"""
-import os, sys, tempfile
+import os, re, sys, tempfile
 import pandas as pd
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import snmp_bulk_config as B
@@ -10,7 +10,7 @@ def ok(c, n, x=''):
 
 os.environ.update(IPAM_SNMP_USER='ipam-ro', IPAM_SNMP_AUTH='Auth#Pass2026', IPAM_SNMP_PRIV='Priv#Pass2026',
                   COLLECTOR_IPS='165.246.12.104,165.246.1.50', NET_USER='netadmin', NET_PASS='SshPass!9', SNMP_V2C_COMMUNITY='public')
-CONFIGURED, SESSIONS = set(), []
+CONFIGURED, SESSIONS, HOSTCFG = set(), [], {}
 real_v3_ok = B.v3_ok
 def fake_v3_ok(host, c):
     if host in CONFIGURED:
@@ -31,6 +31,22 @@ class FakeConn:
             return ' IPV4 Authorized Managers\n Address : 165.246.1.10\n Mask    : 255.255.255.255\n Access  : Manager' if self.kw['host'] == '127.0.0.21' else ' IPV4 Authorized Managers\n'
         if 'control-plane' in cmd:
             return 'apply access-list ip MGMT control-plane vrf default' if self.kw['host'] == '127.0.0.22' else ''
+        h = self.kw['host']
+        if h in HOSTCFG and cmd in HOSTCFG[h]:
+            return HOSTCFG[h][cmd]
+        conf = h in CONFIGURED
+        if cmd.startswith('show snmp user'):
+            return 'User name: ipam-ro\nEngine ID: 800000090300\nGroup-name: IPAM-RO' if conf else ''
+        if cmd == 'show running-config | include snmp-server group':
+            return 'snmp-server group IPAM-RO v3 priv read IPAM-VIEW access IPAM-SNMP' if conf else ''
+        if cmd == 'show ip access-lists IPAM-SNMP':
+            return 'Standard IP access list IPAM-SNMP\n    10 permit 165.246.12.104\n    20 permit 165.246.1.50'
+        if cmd == 'show configuration snmp | display set':
+            return 'set snmp v3 usm local-engine user ipam-ro authentication-sha authentication-key "$9$x"' if conf else ''
+        if cmd == 'display version':
+            return 'Comware Software, Version 7.1.045, Release 3208P05'
+        if cmd == 'display current-configuration | include snmp':
+            return ' snmp-agent usm-user v3 ipam-ro IPAM-RO cipher authentication-mode sha $c$3$x privacy-mode aes128 $c$3$y acl 2999' if conf else ''
         return 'snmp-server community xxxx RO'
     def config_mode(self): self.sent.append('<config>')
     def exit_config_mode(self): self.sent.append('<end>')
@@ -139,4 +155,104 @@ by = {r['ip']: r for r in res}
 ok(not any('ZeroDivision' in r['detail'] for r in res), 'ZeroDivisionError 없음', [(r['ip'], r['detail'][:60]) for r in res])
 ok(all(by[h]['status'] == 'ACL 적용(확인 생략)' for h in ('127.0.0.17', '127.0.0.20', '127.0.0.21', '127.0.0.22', '127.0.0.23')),
    'Cisco·Juniper·HP·Aruba·Comware ACL 적용 → 상태 = ACL 적용(확인 생략)', [(h, by[h]['status']) for h in by])
+
+print('== 현장 오류 대응 (2026-10-07): 장비의 실제 계정·ACL·버전을 읽고 명령을 정함')
+os.environ.update(IPAM_SNMP_USER='ipam-ro', IPAM_SNMP_AUTH='Auth#Pass2026', IPAM_SNMP_PRIV='Priv#Pass2026', COLLECTOR_IPS='10.9.9.9')
+B.time.sleep = lambda *_: None
+V3 = {}
+B.v3_ok = lambda host, c: V3.get(host, (None, 'No SNMP response received before timeout'))
+HOSTCFG.update({
+    '127.0.0.40': {'display version': 'H3C Comware Platform Software\nComware Software, Version 5.20, Release 2222P02',
+                   'display current-configuration | include snmp':
+                       ' snmp-agent group v3 OLD-RO privacy read-view iso-view\n snmp-agent usm-user v3 ipam-ro OLD-RO acl 2000',
+                   'display acl 2000': 'Basic ACL  2000, 2 rules\nACL\'s step is 5\n rule 0 permit source 165.246.1.10 0\n rule 5 deny (12 times matched)'},
+    '127.0.0.41': {'show snmp user ipam-ro': 'User name: ipam-ro\nEngine ID: 800000090300\nstorage-type: nonvolatile\t active\taccess-list: SNMP-USR\nAuthentication Protocol: SHA\nPrivacy Protocol: AES128\nGroup-name: NMS',
+                   'show ip access-lists SNMP-USR': 'Standard IP access list SNMP-USR\n    10 permit 165.246.1.10',
+                   'show running-config | include snmp-server group': 'snmp-server group NMS v3 priv read ALL access 10',
+                   'show ip access-lists 10': 'Standard IP access list 10\n    10 permit 165.246.1.10\n    20 deny   any log'},
+    '127.0.0.42': {'show configuration snmp | display set': 'set snmp community public authorization read-only',
+                   'show configuration interfaces lo0 | display set': 'set interfaces lo0 unit 0 family inet filter input PROTECT-RE',
+                   'show configuration firewall | display set':
+                       'set firewall family inet filter PROTECT-RE term ssh from source-prefix-list MGMT\n'
+                       'set firewall family inet filter PROTECT-RE term ssh from protocol tcp\n'
+                       'set firewall family inet filter PROTECT-RE term ssh from port ssh\n'
+                       'set firewall family inet filter PROTECT-RE term ssh then accept\n'
+                       'set firewall family inet filter PROTECT-RE term snmp from source-prefix-list SNMP-MGR\n'
+                       'set firewall family inet filter PROTECT-RE term snmp from protocol udp\n'
+                       'set firewall family inet filter PROTECT-RE term snmp from port snmp\n'
+                       'set firewall family inet filter PROTECT-RE term snmp then accept'},
+    '127.0.0.43': {'show snmp user ipam-ro': ''},
+})
+inv2 = pd.DataFrame([{'ip': '127.0.0.40', 'name': 'cw5', 'vendor': 'hp_comware'},
+                     {'ip': '127.0.0.41', 'name': 'xe', 'vendor': 'cisco_xe'},
+                     {'ip': '127.0.0.42', 'name': 'jx', 'vendor': 'juniper_junos'},
+                     {'ip': '127.0.0.44', 'name': 'no-ssh', 'vendor': 'cisco_ios'}])
+inv2.to_excel('dev2.xlsx', index=False)
+
+class TcpFail(Exception):
+    pass
+TELNET_USED = []
+class FakeConn2(FakeConn):
+    def __init__(self, **kw):
+        if kw['host'] == '127.0.0.44' and not kw['device_type'].endswith('_telnet'):
+            raise TcpFail('TCP connection to device failed.')
+        if kw['device_type'].endswith('_telnet'):
+            TELNET_USED.append(kw['device_type'])
+        super().__init__(**kw)
+
+SESSIONS.clear()
+V3['127.0.0.41'] = (None, 'Unknown USM user name')
+res = {r['ip']: r for r in B.main(['dev2.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn2)}
+by = {s.kw['host']: s for s in SESSIONS}
+cw = by['127.0.0.40'].sent
+ok('acl number 2000' in cw and not any(x.startswith('acl basic') for x in cw), "Comware 5: 'acl basic' 대신 'acl number' (system-view 뒤 명령 거부 원인)", cw)
+ok(any(re.fullmatch(r'rule [1-4] permit source 10\.9\.9\.9 0', x) for x in cw),
+   "Comware: 사용 중인 ACL 2000 의 'rule 5 deny' 앞 번호로 추가", cw)
+ok(not any('usm-user' in x for x in cw), 'Comware: 계정 있음 → 계정 명령 안 넣음', cw)
+xe = by['127.0.0.41'].sent
+ok('ip access-list standard 10' in xe and any(re.fullmatch(r' 1[1-9] permit 10\.9\.9\.9', x) for x in xe),
+   "Cisco XE: 그룹이 실제로 쓰는 ACL 10 의 'deny any log' 앞 순번에 추가", xe)
+ok(not any('IPAM-SNMP' in x for x in xe), 'Cisco XE: 쓰지 않는 IPAM-SNMP ACL 은 만들지 않음', xe)
+ok('ip access-list standard SNMP-USR' in xe and ' permit 10.9.9.9' in xe, "Cisco XE: 계정에 직접 걸린 ACL(show snmp user 의 access-list)에도 추가", xe)
+d41 = res['127.0.0.41']['detail']
+ok(res['127.0.0.41']['status'] == '적용 후 확인 실패' and '이 PC' in d41 and 'COLLECTOR_IPS' in d41,
+   'Unknown USM user: 확인 요청을 보낸 PC 가 수집 서버가 아니면 그 사실과 서버에서 확인하는 방법 안내', d41)
+jx = by['127.0.0.42'].sent
+ok('set policy-options prefix-list SNMP-MGR 10.9.9.9/32' in jx, 'Juniper: lo0 필터에서 SNMP 허용 prefix-list(SNMP-MGR)를 찾아 추가', jx)
+ok(any('usm local-engine user ipam-ro' in x for x in jx) and '<commit>' in jx and '계정도 추가' in res['127.0.0.42']['detail'],
+   "Juniper: 계정이 없으면(Unknown USM user·'넣을 명령 없음' 원인) 계정도 추가 후 commit", res['127.0.0.42'])
+ok(res['127.0.0.44']['status'] == '오류' and 'vty' in res['127.0.0.44']['detail'] and '--telnet' in res['127.0.0.44']['detail'],
+   'TCP 접속 실패: 원인(vty ACL·SSH 꺼짐)과 --telnet 안내', res['127.0.0.44'])
+
+SESSIONS.clear(); TELNET_USED.clear()
+V3['127.0.0.44'] = ('sw-44', None)
+res = {r['ip']: r for r in B.main(['dev2.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161', '--telnet',
+                                     '--limit', '4'], connect=FakeConn2)}
+ok(TELNET_USED == ['cisco_ios_telnet'] and res['127.0.0.44']['status'] == '적용 완료' and '텔넷' in res['127.0.0.44']['detail'],
+   '--telnet: SSH 가 안 되는 장비만 텔넷으로 적용', (TELNET_USED, res['127.0.0.44']))
+
+print('== 계정 없는 장비 + 계정 환경변수 없음')
+for k in ('IPAM_SNMP_AUTH', 'IPAM_SNMP_PRIV'):
+    os.environ.pop(k)
+pd.DataFrame([{'ip': '127.0.0.43', 'name': 'xe2', 'vendor': 'cisco_xe'}]).to_excel('dev3.xlsx', index=False)
+res = B.main(['dev3.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn2)
+ok(res[0]['status'] == '조치 필요' and '--acl-only 없이' in res[0]['detail'], '계정이 없는 장비에 ACL 만 넣지 않고 조치 안내', res[0])
+
+print('== 벤더 판별 보강')
+ok(B.guess_from_version('Cisco IOS XE Software, Version 17.09.04a') == 'cisco_xe', 'show version → IOS-XE')
+ok(B.guess_from_version('JUNOS Base OS boot [21.4R3]') == 'juniper_junos', 'show version → Junos')
+ok(B.guess_from_version('HPE Comware Software, Version 7.1.070') == 'hp_comware', 'display version → Comware')
+ok(B.guess_from_version('Image stamp: /ws/swbuildm/... ArubaOS-Switch') == 'hp_procurve', 'show version → ProCurve/ArubaOS-Switch')
+class VerConn(FakeConn):
+    probe = True
+    def send_command_timing(self, cmd, **kw):
+        self.sent.append(cmd)
+        return '% Unrecognized command found at \'^\' position.' if cmd == 'show version' else \
+            'H3C Comware Software, Version 5.20, Release 1808P21'
+class _C2: ssh_user, ssh_pass, secret, telnet = 'u', 'p', '', False
+ok(B._probe_version('127.0.0.50', _C2(), VerConn) == 'hp_comware', "SSHDetect 실패 시 'display version' 으로 Comware 판별")
+prev = pd.DataFrame([{'ip': '127.0.0.40', 'vendor': 'hp_comware', 'status': '오류'}]); prev.to_excel('prev.xlsx', index=False)
+pd.DataFrame([{'ip': '127.0.0.40', 'name': 'cw5'}]).to_excel('dev4.xlsx', index=False)
+class _A: from_netbox = False; inventory = 'dev4.xlsx'; only_failed = 'prev.xlsx'; limit = 0
+ok(B.load_inventory(_A())[0]['vendor'] == 'hp_comware', '--only-failed: 지난 결과의 장비 종류를 다시 판별하지 않고 사용')
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")
