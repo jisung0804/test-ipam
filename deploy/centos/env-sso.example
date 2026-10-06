@@ -1,0 +1,35 @@
+# =====================================================================================
+# [2단계: 실제 시스템 연동] SSO 설정 — env/netbox.env 끝에 '하나의 방식만' 붙여 넣고 값을 채운다
+#   전제: HTTPS(nginx-netbox.conf, https://ipam.<도메인>:18000)가 먼저 동작해야 한다 (SSO 는 https 주소로 돌아옴)
+#   전제: sso_groups.py 로 'IP신청자'·'IP발급관리자' 그룹을 먼저 만든다
+#   적용: cd /opt/netbox-docker && docker compose up -d
+#   비상용: SSO 와 별개로 NetBox 로컬 관리자 계정(admin) 로그인은 계속 된다 — 비밀번호를 안전하게 보관
+#   주의: 값 뒤에 # 주석을 붙이지 말 것 (값의 일부로 읽힘)
+# =====================================================================================
+
+# ---------- A. OIDC (학교 SSO 가 OpenID Connect 를 지원할 때 — 권장) ----------
+# 학교 SSO 담당에게 클라이언트 등록 요청 시 알려 줄 값:
+#   Redirect URI : https://ipam.<도메인>:18000/oauth/complete/oidc/
+#   Scope        : openid profile email
+REMOTE_AUTH_BACKEND=social_core.backends.open_id_connect.OpenIdConnectAuth
+SOCIAL_AUTH_OIDC_OIDC_ENDPOINT=https://sso.<학교도메인>/<issuer 경로>
+SOCIAL_AUTH_OIDC_KEY=<담당자가 준 Client ID>
+SOCIAL_AUTH_OIDC_SECRET=<담당자가 준 Client Secret>
+SOCIAL_AUTH_OIDC_SCOPE=openid profile email
+REMOTE_AUTH_DEFAULT_GROUPS=IP신청자
+
+# ---------- B. LDAP / Active Directory (학교 계정 서버에 직접 붙일 때) ----------
+# REMOTE_AUTH_BACKEND=netbox.authentication.LDAPBackend
+# AUTH_LDAP_SERVER_URI=ldaps://ldap.<학교도메인>
+# AUTH_LDAP_BIND_DN=CN=netbox-svc,OU=Service,DC=<학교>,DC=ac,DC=kr
+# AUTH_LDAP_BIND_PASSWORD=<서비스 계정 비밀번호>
+# AUTH_LDAP_USER_SEARCH_BASEDN=OU=Users,DC=<학교>,DC=ac,DC=kr
+# (아래 값: AD 는 sAMAccountName, OpenLDAP 은 uid)
+# AUTH_LDAP_USER_SEARCH_ATTR=sAMAccountName
+# AUTH_LDAP_ATTR_FIRSTNAME=givenName
+# AUTH_LDAP_ATTR_LASTNAME=sn
+# AUTH_LDAP_ATTR_MAIL=mail
+# REMOTE_AUTH_DEFAULT_GROUPS=IP신청자
+
+# ---------- C. SAML ----------
+# 학교 SSO 가 SAML 만 지원하면 이미지에 SAML 라이브러리(xmlsec)를 추가로 넣어야 한다 — 이 경우 따로 요청

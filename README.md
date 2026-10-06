@@ -95,6 +95,10 @@ IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정을 NetBox�
 | `export_old_server.sh` + `counts.sql` | 기존 서버(WSL) netbox-docker 폴더 | DB·업로드 파일·설정을 tar 하나로 (`--final` = 기존 서버 정지 유지) |
 | `restore_new_server.sh` | 새 서버 /opt/netbox-docker | 묶음(또는 백업 폴더) 복원 → 빌드 → 기동 → 건수 비교 |
 | `docker-compose.override.yml` | 새 서버 | 운영용: 8000 포트 127.0.0.1 전용, 자동 재시작 |
-| `nginx-netbox.conf` | 새 서버 /etc/nginx/conf.d/ | HTTPS 프록시 |
+| `pilot_setup.sh` | 새 서버 (sudo) | 시범 운영: http://<서버IP>:18000, 관리자 IP만 허용(firewalld+nginx), SELinux 포트, ALLOWED_HOSTS·CSRF 등록. 전체 목록으로 다시 실행하면 허용 대상 변경 |
+| `nginx-netbox-pilot.conf` | (pilot_setup.sh 가 설치) | 시범 운영 nginx: 18000 http → 127.0.0.1:8000 |
+| `nginx-netbox.conf` | 새 서버 /etc/nginx/conf.d/ | 실제 운영 nginx: 18000 https(기관 인증서), http 로 오면 https 로 전환 |
+| `sso_groups.py` | 새 서버 (manage.py shell 입력) | 'IP신청자'·'IP발급관리자' 그룹·권한 생성 |
+| `env-sso.example` | env/netbox.env 에 붙여 넣기 | SSO 설정 예시 (OIDC / LDAP) |
 | `backup.sh` | 새 서버 cron | 매일 DB·파일·설정 백업, 14일 보관 |
 | `post_check.sh` | 새 서버 | 이관 후 점검 (컨테이너·마이그레이션·포트·메일·백업) |
