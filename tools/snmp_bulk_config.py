@@ -220,7 +220,10 @@ def detect(host, c, given=''):
             if g:
                 return g, 'SSH 자동 판별'
         except Exception as e:
-            return None, f'SSH 자동 판별 실패: {e}'
+            msg = f'SSH 자동 판별 실패: {e}'
+            if 'SSHException' in msg or 'Incompatible ssh' in msg:
+                msg = LEGACY_SSH_HINT + ' | ' + msg
+            return None, msg
     return None, '벤더를 알 수 없음 (목록에 vendor 를 적거나 SNMP_V2C_COMMUNITY 지정)'
 
 
@@ -324,7 +327,26 @@ def handle(row, c, backup_dir, connect=None):
                    + (acl_note + '. ' if acl_note else '') + '장비 출력: ' + mask(out[-300:], c))
     except Exception as e:
         res.update(status='오류', detail=mask(f'{type(e).__name__}: {e}', c)[:500])
+    if 'SSHException' in res['detail'] or 'Incompatible ssh' in res['detail']:
+        res['detail'] = (LEGACY_SSH_HINT + ' | ' + res['detail'])[:500]
     return res
+
+
+LEGACY_SSH_HINT = ('SSH 협상 실패 — 구형 장비(diffie-hellman-group1/14-sha1, ssh-rsa, ssh-dss)라면 '
+                   "paramiko 3.x 가 필요: pip install 'paramiko<4'")
+
+
+def _paramiko_note():
+    """paramiko 4.0 이상은 구형 스위치가 쓰는 SSH 알고리즘(group1/14-sha1, ssh-rsa, ssh-dss)을 지원하지 않는다"""
+    try:
+        import paramiko
+        major = int(paramiko.__version__.split('.')[0])
+    except Exception:
+        return ''
+    if major >= 4:
+        return (f"※ paramiko {paramiko.__version__}: 구형 장비 SSH 접속이 실패할 수 있음 "
+                f"→ {sys.executable} -m pip install 'paramiko<4'")
+    return ''
 
 
 # --------------------------------------------------------------------- 목록
@@ -383,6 +405,8 @@ def main(argv=None, connect=None):
     out = a.out or f'result_{stamp}.xlsx'
     backup_dir = f'backup_{stamp}'
     print(f"{'적용' if a.apply else '점검'} 대상 {len(rows)}대, 동시 {a.workers}대")
+    if _paramiko_note():
+        print(_paramiko_note())
     results = []
     with ThreadPoolExecutor(a.workers) as ex:
         for i, r in enumerate(ex.map(lambda row: handle(row, c, backup_dir, connect), rows), 1):
