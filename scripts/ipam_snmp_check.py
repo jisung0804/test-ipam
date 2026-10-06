@@ -6,6 +6,7 @@
 '변경 사항 커밋'을 체크하지 않으면 읽기만 하고 대장에는 반영하지 않는다.
 """
 from dcim.models import Device
+from django.conf import settings
 from extras.scripts import BooleanVar, ChoiceVar, IPAddressVar, MultiObjectVar, Script
 from utilities.exceptions import AbortScript
 
@@ -27,8 +28,10 @@ class SnmpCheck(Script):
                         description='NetBox에 없는 장비의 응답만 확인 (예: 10.0.0.1/32)')
     what = ChoiceVar(choices=(('both', 'ARP + MAC'), ('arp', 'ARP만'), ('mac', 'MAC만')), default='both',
                      label='수집 항목')
-    register = BooleanVar(label='대장에 없는 IP 자동 등록', default=True,
-                          description="ARP에 보였지만 IP 주소 목록에 없는 단말을 '자동 발견' 태그로 등록 (대역이 없으면 /24 생성)")
+    register = BooleanVar(label='대장에 없는 IP 자동 등록',
+                          default=settings.PLUGINS_CONFIG.get('netbox_ip_request', {}).get('auto_register_discovered', True),
+                          description="ARP에 보였지만 IP 주소 목록에 없는 단말을 '자동 발견' 태그로 등록 (대역이 없으면 /24 생성). "
+                                      "기본값은 서버 설정 IPAM_AUTO_REGISTER 를 따름 — 관리자 판정 기간(0)에는 꺼 둘 것")
 
     def run(self, data, commit):
         snmp.ensure_tags()

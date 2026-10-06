@@ -65,7 +65,8 @@ PLUGINS_CONFIG = {
         # IP 주소 빠른 검색을 '앞뒤 상관없이 포함' 검색으로 (False 면 NetBox 기본: 앞부분 일치)
         'contains_search': True,
         # 대사: 이 기간(일) 안에 ARP 에 안 보이면 '미관측', IP 자원 화면 '실사용' 기준
-        'l2_overwrite': True,   # 엑셀은 최초 값 — 실제 L2(SNMP)로 본 MAC·스위치·포트로 대장을 덮어씀 (False 면 대사 결과만 표시)
+        # 엑셀은 최초 값 — 실제 L2(SNMP)로 본 MAC·스위치·포트로 대장을 덮어씀. 0 이면 대사 결과만 표시(관리자 판정 기간)
+        'l2_overwrite': os.environ.get('IPAM_L2_OVERWRITE', '1') == '1',
         'recon_days': 30,
         # 장비 인터페이스·VLAN·대역 SNMP 동기화 주기(분). 0 = 끔
         'inventory_interval': 1440,

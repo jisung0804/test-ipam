@@ -69,7 +69,9 @@ class RoomExcelImport(Script):
         self.log_info(summary)
         c = RI.commit(rep['rows'], data['site_name'], mode=data['existing'], log=self.log_info)
         result = (f"호실 {c['room']}개, 스위치 {c['switch']}대, IP 신규 {c['created']}건, 덮어씀 {c['updated']}건, "
-                  f"합침 {c['merged']}건, 건너뜀(이미 있음) {c['skipped']}건, 미발급 {c['blank']}건, 실패 {c['failed']}건")
+                  f"합침 {c['merged']}건, 건너뜀(이미 있음) {c['skipped']}건, 미발급 {c['blank']}건, 실패 {c['failed']}건 · "
+                  f"스위치: 등록 장비에 연결 {c.get('sw_linked', 0)}대, 새로 만듦(SW-IP) {c.get('sw_new', 0)}대, "
+                  f"포트 못 찾음 {c.get('port_unmatched', 0)}건")
         if commit_changes:
             self.log_success('반영 완료 — ' + result)
         else:

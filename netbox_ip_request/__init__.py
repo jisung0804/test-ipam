@@ -5,7 +5,7 @@ class IPRequestConfig(PluginConfig):
     name = 'netbox_ip_request'
     verbose_name = 'IP 발급 신청'
     description = 'IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정'
-    version = '0.5.0'
+    version = '0.5.1'
     base_url = 'ip-request'
     min_version = '4.5.0'
     default_settings = {

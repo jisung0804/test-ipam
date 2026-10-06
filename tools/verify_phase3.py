@@ -28,11 +28,11 @@ def ok(c, n, x=''):
 
 def wipe():
     ArpEntry.objects.all().delete(); MacEntry.objects.all().delete(); Discrepancy.objects.all().delete()
-    for d in Device.objects.filter(site__slug__in=['p3-site', 'snmp-test']):
+    for d in Device.objects.filter(site__slug__in=['p3-site', 'snmp-test', 'rb-site']):
         d.primary_ip4 = None; d.save()
     IPAddress.objects.filter(address__net_host_contained='165.246.48.0/21').delete()
     IPAddress.objects.filter(address__net_host_contained='127.0.0.0/8').delete()
-    for d in Device.objects.filter(site__slug__in=['p3-site', 'snmp-test']):
+    for d in Device.objects.filter(site__slug__in=['p3-site', 'snmp-test', 'rb-site']):
         d.delete()
     Prefix.objects.filter(prefix__net_contained_or_equal='165.246.48.0/21').delete()
     Prefix.objects.filter(vlan__group__slug='p3-site-vlan').update(vlan=None)

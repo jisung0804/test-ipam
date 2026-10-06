@@ -1,0 +1,7 @@
+*.egg-info/
+*.rdb
+*.env
+!*.env.example
+tools/result_*.xlsx
+tools/backup_*/
+__pycache__/

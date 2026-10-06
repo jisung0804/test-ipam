@@ -296,6 +296,24 @@ _TEXT_CF = ('ip_user', 'purpose', 'outlet_no', 'patch_panel', 'patch_port', 'man
 _FILL_CF = ('room', 'switch', 'switch_port', 'host_mac')
 
 
+def _match_port(excel, ifaces):
+    """엑셀 포트 글자 → 실제 인터페이스. '5' 는 마지막 번호, '1/0/5' 는 'Gi1/0/5'·'GigabitEthernet1/0/5' 처럼
+    앞의 영문(종류)만 다른 이름과 맞춘다. 후보가 둘 이상이면(예: Gi1/0/5·Te1/0/5) 연결하지 않음"""
+    from .logic import _same_port
+    e = str(excel).strip()
+    if not e:
+        return None
+    exact = [i for i in ifaces if i.name.lower() == e.lower()]
+    if exact:
+        return exact[0]
+    if e.isdigit():
+        c = [i for i in ifaces if _same_port(e, i.name)]
+    else:
+        num = lambda t: _re.sub(r'^[A-Za-z\-_ ]+', '', t.strip()).lower()
+        c = [i for i in ifaces if num(i.name) == num(e) and num(e)]
+    return c[0] if len(c) == 1 else None
+
+
 def _merge_into(o, tenant, dns_name, desc, note, cf):
     """기존 IP에 엑셀 값을 합친다: 빈 칸은 채우고, 글자 칸은 다른 값이면 ' / '로 이어 붙인다."""
     o.tenant = o.tenant or tenant
@@ -311,6 +329,8 @@ def _merge_into(o, tenant, dns_name, desc, note, cf):
             d[k] = cf[k]
     if cf.get('host_mac') and d.get('host_mac') and d['host_mac'] != cf['host_mac']:
         o.comments = _join([o.comments, f"엑셀 MAC: {cf['host_mac']}"])
+    if cf.get('excel_orig') and not d.get('excel_orig'):
+        d['excel_orig'] = cf['excel_orig']
 
 
 def commit(rows, site_name, update_existing=False, log=print, mode=None):
@@ -380,6 +400,18 @@ def commit(rows, site_name, update_existing=False, log=print, mode=None):
 
     devs = {d.name: d for d in Device.objects.filter(role=role)}
     ports = {(i.device_id, i.name): i for i in Interface.objects.filter(device__role=role)}
+    # 장비 등록(SNMP)을 먼저 했다면 엑셀의 스위치 IP 는 그 실제 장비로 연결한다 (SW-<IP> 가짜 장비를 새로 만들지 않음)
+    from .inventory import find_device
+    synced = set()          # SNMP 로 등록·갱신된 실제 장비 — 엑셀 포트 이름으로 인터페이스를 새로 만들지 않음
+    for sw_ip in sorted({x['sw_ip'] for x in rows if x['sw_ip']}):
+        d = find_device(sw_ip)
+        if d is not None:
+            devs[f'SW-{sw_ip}'] = d
+            counts['sw_linked'] += 1
+            if d.platform_id or d.tags.filter(slug__in=['ipam-mac', 'ipam-arp']).exists():
+                synced.add(d.pk)
+                for i in Interface.objects.filter(device=d):
+                    ports[(d.pk, i.name)] = i
     for sw_ip, rr in sorted({(x['sw_ip'], x['rack_room']) for x in rows if x['sw_ip']}):
         name = f'SW-{sw_ip}'
         if name in devs:
@@ -391,6 +423,8 @@ def commit(rows, site_name, update_existing=False, log=print, mode=None):
             log(f"스위치 {name} 등록 실패(스위치 연결 없이 계속) — {'; '.join(e.messages)[:150]}")
             continue
         d.save(); devs[name] = d
+        counts['sw_new'] += 1
+        log(f'스위치 {sw_ip}: 등록된 장비 중 이 IP 를 가진 장비가 없어 {name} 으로 새로 만듦 (장비 등록을 먼저 하면 실제 장비에 연결됨)')
         mg = Interface(device=d, name='mgmt', type='virtual', mgmt_only=True); mg.save()
         mip = IPAddress.objects.filter(address__net_host=sw_ip).first()
         if mip is None:
@@ -418,8 +452,10 @@ def commit(rows, site_name, update_existing=False, log=print, mode=None):
         sw = devs.get(f"SW-{x['sw_ip']}") if x['sw_ip'] else None
         port = None
         if sw and x['sw_port']:
-            port = ports.get((sw.pk, x['sw_port']))
-            if not port:
+            port = ports.get((sw.pk, x['sw_port'])) or _match_port(x['sw_port'], [i for (dp, _), i in ports.items() if dp == sw.pk])
+            if not port and sw.pk in synced:
+                counts['port_unmatched'] += 1      # 실제 장비에 없는 포트 이름 → 연결하지 않고 '엑셀 원본값'에만 남김
+            elif not port:
                 port = Interface(device=sw, name=x['sw_port'], type='1000base-t'); port.save()
                 ports[(sw.pk, x['sw_port'])] = port
         room_obj = locs.get(x['room'][:100]) if x['room'] else None
@@ -427,7 +463,9 @@ def commit(rows, site_name, update_existing=False, log=print, mode=None):
               'switch_port': port.pk if port else None,
               'host_mac': x['mac'], 'ip_user': x['manager'] or None, 'manager_phone': x['phone'] or None,
               'outlet_no': x['outlet'] or None, 'patch_panel': x['patch'] or None, 'purpose': x['purpose'] or None,
-              'patch_port': x['patch_port'] or None, 'legacy_seq': x['seq'] or None}
+              'patch_port': x['patch_port'] or None, 'legacy_seq': x['seq'] or None,
+              # 엑셀에 적힌 그대로 보관 — 실제 L2 와 비교·판정할 때 기준 (장비 이름이 아니라 엑셀의 스위치 IP·포트 글자)
+              'excel_orig': (f"MAC {x['mac'] or '-'} · 스위치 {x['sw_ip'] or '-'} · 포트 {x['sw_port'] or '-'}")[:250]}
         desc = x['room_name'][:200]           # 설명(화면 이름: 호실명) = 호관호실명칭
         host, note = x['hostname'], x['note']
         if host and not _DNS.match(host):     # DNS 이름 규칙에 안 맞는 호스트 이름은 비고로
