@@ -188,6 +188,11 @@ def _snmp_get(host, port, oids, cred=None, community=None, timeout=2, retries=1)
 
 
 def v3_ok(host, c):
+    # 계정 비밀번호가 비어 있으면 pysnmp 가 키 계산 중 ZeroDivisionError 를 낸다 → 확인 자체를 하지 않음
+    if not (c.user and c.auth and c.priv):
+        return None, 'SNMP 계정 환경변수(IPAM_SNMP_USER/AUTH/PRIV) 없음 — SNMPv3 확인 생략'
+    if len(c.auth) < 8 or len(c.priv) < 8:
+        return None, 'SNMP 비밀번호는 8자 이상이어야 함 (IPAM_SNMP_AUTH/PRIV)'
     vals, err = _snmp_get(host, c.port, ['1.3.6.1.2.1.1.5.0'], cred=c)
     return (str(vals[0]), None) if vals else (None, err)
 
@@ -300,6 +305,10 @@ def handle(row, c, backup_dir, connect=None):
             return res
         out = push(host, dtype, cmds, c, backup_dir, connect)
         acl_note = '; '.join(l[6:] for l in out.splitlines() if l.startswith('[ACL] '))
+        if c.acl_only and not (c.auth and c.priv):
+            res.update(status='ACL 적용(확인 생략)', detail=acl_note or 'SNMP 계정 환경변수가 없어 SNMPv3 확인은 건너뜀')
+            return res
+        err = ''
         for i in range(4):  # 장비가 계정을 반영하는 데 몇 초 걸릴 수 있음
             time.sleep(2 + i * 2)
             sysname, err = v3_ok(host, c)

@@ -123,4 +123,20 @@ try:
     B.main(['devices.xlsx']); ok(False, '짧은 비밀번호 거부')
 except SystemExit as e:
     ok('8자 이상' in str(e), '짧은/특수문자 비밀번호는 시작 전에 거부')
+print('== 실제 현장 조건: SNMP 계정 환경변수 없이 --apply --acl-only (가짜 확인 없이 실제 v3_ok 사용)')
+class _C: user, auth, priv, port = 'ipam-ro', '', '', 1161
+_r = real_v3_ok('127.0.0.9', _C())
+ok(_r[0] is None and '없음' in _r[1], '빈 비밀번호 → SNMPv3 확인 생략, ZeroDivisionError 없음', _r)
+_C.auth = _C.priv = 'short'
+_r = real_v3_ok('127.0.0.9', _C())
+ok(_r[0] is None and '8자' in _r[1], '8자 미만 비밀번호 → 안내만(예외 없음)', _r)
+for k in ('IPAM_SNMP_USER', 'IPAM_SNMP_AUTH', 'IPAM_SNMP_PRIV'):
+    os.environ.pop(k, None)
+B.v3_ok = real_v3_ok
+os.environ['COLLECTOR_IPS'] = '10.9.9.9'
+res = B.main(['devices.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn)
+by = {r['ip']: r for r in res}
+ok(not any('ZeroDivision' in r['detail'] for r in res), 'ZeroDivisionError 없음', [(r['ip'], r['detail'][:60]) for r in res])
+ok(all(by[h]['status'] == 'ACL 적용(확인 생략)' for h in ('127.0.0.17', '127.0.0.20', '127.0.0.21', '127.0.0.22', '127.0.0.23')),
+   'Cisco·Juniper·HP·Aruba·Comware ACL 적용 → 상태 = ACL 적용(확인 생략)', [(h, by[h]['status']) for h in by])
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")
