@@ -5,3 +5,4 @@
 tools/result_*.xlsx
 tools/backup_*/
 __pycache__/
+tools/acl_fix_*

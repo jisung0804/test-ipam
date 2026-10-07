@@ -21,7 +21,8 @@ OLD=~/netbox-docker/netbox-ip-request/tools
 VENV=${IPAM_VENV:-~/ipam-tools}
 VENV=${VENV/#\~/$HOME}
 
-find_file() {   # 이름 또는 패턴 → 첫 번째로 있는 경로
+find_file() {   # 이름 또는 패턴 → 첫 번째로 있는 경로 (절대경로면 그대로)
+  if [[ "$1" == /* ]]; then [ -f "$1" ] && { echo "$1"; return 0; }; return 1; fi
   for d in "$START" "$TOOLS" "$OLD"; do
     for f in $d/$1; do [ -f "$f" ] && { echo "$f"; return 0; }; done
   done
@@ -51,17 +52,13 @@ done
 if [[ " ${ARGS[*]-} " != *" --from-netbox "* ]]; then
   INV=${INV:-devices.xlsx}
   P=$(find_file "$INV") || { echo "장비 목록 '$INV' 를 찾지 못함 — 찾아본 곳: $START, $TOOLS, $OLD"; exit 1; }
-  if [ "$(dirname "$P")" != "$TOOLS" ] && [ ! -e "$TOOLS/$(basename "$P")" ]; then
-    cp "$P" "$TOOLS/" && echo "[준비] 장비 목록 복사: $P → $TOOLS/"
-  fi
-  ARGS=("$(basename "$P")" "${ARGS[@]+"${ARGS[@]}"}")
+  ARGS=("$P" "${ARGS[@]+"${ARGS[@]}"}")      # 찾은 위치 그대로 사용(복사하지 않음)
 fi
 if [ $RETRY = 1 ]; then
   LAST=$(ls -t "$TOOLS"/result_*.xlsx "$OLD"/result_*.xlsx "$START"/result_*.xlsx 2>/dev/null | head -1)
   [ -n "$LAST" ] || { echo "--retry: 이전 결과 파일(result_*.xlsx)이 없습니다. 처음 실행이면 --retry 빼고 실행"; exit 1; }
-  [ "$(dirname "$LAST")" = "$TOOLS" ] || [ -e "$TOOLS/$(basename "$LAST")" ] || cp "$LAST" "$TOOLS/"
   echo "[준비] 실패분만 다시: $(basename "$LAST")"
-  ARGS+=(--only-failed "$(basename "$LAST")")
+  ARGS+=(--only-failed "$LAST")
 fi
 
 # ---- 3) 환경변수 (없으면 물어봄)

@@ -446,21 +446,27 @@ def inspect(conn, dtype, c, bak):
             else:
                 fw = conn.send_command('show configuration firewall | display set')
                 terms = {}
-                for m in re.finditer(r'^set firewall (?:family inet )?filter (\S+) term (\S+) (.*)$', fw, re.M):
-                    if m.group(1) in filters:
-                        terms.setdefault((m.group(1), m.group(2)), []).append(m.group(3))
-                cand = set()
-                for parts in terms.values():
+                for m in re.finditer(r'^(set firewall (?:family inet )?filter (\S+) term (\S+)) (.*)$', fw, re.M):
+                    if m.group(2) in filters:
+                        terms.setdefault(m.group(1), []).append(m.group(4))
+                cand, inline = set(), []
+                for head, parts in terms.items():
                     t = ' '.join(parts)
                     if re.search(r'(port|destination-port) (snmp|161)\b', t) and 'then accept' in t:
-                        cand.update(re.findall(r'from (?:source-prefix-list|prefix-list) (\S+)', t))
-                if len(cand) == 1:
-                    f['prefix_list'] = cand.pop()
-                    f['notes'].append(f"lo0 필터 {','.join(filters)} 의 SNMP 허용 목록 = {f['prefix_list']}")
+                        pl = re.findall(r'from (?:source-prefix-list|prefix-list) (\S+)', t)
+                        cand.update(pl)
+                        if not pl and re.search(r'from (?:source-address|address) ', t):
+                            inline.append(head)        # 주소를 term 안에 직접 적은 경우
+                f['prefix_lists'] = sorted(cand)
+                f['src_terms'] = inline
+                if cand or inline:
+                    f['prefix_list'] = f['prefix_lists'][0] if cand else None
+                    f['notes'].append(f"lo0 필터 {','.join(filters)} 의 SNMP 허용: "
+                                      + ', '.join([f'prefix-list {x}' for x in sorted(cand)] +
+                                                  [f"term {h.split(' term ')[1]} 의 source-address" for h in inline]))
                 else:
-                    f['notes'].append(f"lo0 필터 {','.join(filters)} 에서 SNMP 허용 prefix-list 를 "
-                                      f"{'여러 개 찾음: ' + ','.join(sorted(cand)) if cand else '못 찾음'} "
-                                      '→ --junos-prefix-list 로 지정')
+                    f['notes'].append(f"lo0 필터 {','.join(filters)} 에 SNMP 를 허용하는 term 을 못 찾음 — "
+                                      'SNMP 가 막혀 있다면 그 필터에 수동 추가 필요(또는 --junos-prefix-list 지정)')
     elif dtype == 'hp_comware':
         v = conn.send_command('display version')
         m = re.search(r'(?:Comware|Versatile Routing Platform)\b.*?Version\s+(\d+)\.', v, re.I | re.S)
@@ -521,9 +527,10 @@ def plan(dtype, c, f, preview):
         if need_account:
             cmds += account_commands(dtype, c, f)
     elif dtype == 'juniper_junos':
-        pl = f.get('prefix_list')
-        if pl:
+        for pl in (f.get('prefix_lists') or ([f['prefix_list']] if f.get('prefix_list') else [])):
             cmds += [f'set policy-options prefix-list {pl} {ip}/32' for ip in ips]
+        for head in f.get('src_terms') or []:
+            cmds += [f'{head} from source-address {ip}/32' for ip in ips]
         if need_account:
             cmds += account_commands(dtype, c, f)
     elif dtype == 'hp_comware':
@@ -743,6 +750,7 @@ def handle(row, c, backup_dir, connect=None):
         res.update(status='목록 오류', detail=f"ip 칸 값이 IP 주소가 아님: '{host}'")
         return res
     if c.verify_only:
+        res['src_ip'] = _local_ip(host, c.port)          # 이 서버가 이 장비로 보낼 때 쓰는 출발 IP = ACL 에 넣어야 할 IP
         sysname, err = v3_ok(host, c)
         if sysname is not None:
             res.update(status='응답 확인', detail=f'SNMPv3 응답: {sysname}')
@@ -913,6 +921,11 @@ def main(argv=None, connect=None):
     df = pd.DataFrame(results)
     df.to_excel(out, index=False)
     print('\n상태별:', df['status'].value_counts().to_dict())
+    if a.verify_only and 'src_ip' in df.columns:
+        srcs = sorted({x for x in df['src_ip'] if x})
+        with open('collector_ips.txt', 'w') as fh:
+            fh.write(','.join(srcs) + '\n')
+        print(f"이 서버가 장비로 보내는 출발 IP: {', '.join(srcs) or '-'}  → 장비 ACL 에는 이 IP 가 있어야 함 (collector_ips.txt)")
     print(f'결과 파일: {out}' + (f' / 적용 전 snmp 설정 백업: {backup_dir}/' if a.apply else ''))
     return results
 

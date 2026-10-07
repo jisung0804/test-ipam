@@ -339,4 +339,34 @@ B.port_state = _ps
 import socket as _so
 _srv = _so.socket(); _srv.bind(('127.0.0.1', 0)); _srv.listen()
 ok(B.port_state('127.0.0.1', _srv.getsockname()[1]) == '열림' and B.port_state('127.0.0.1', 1) == '거부', '실제 포트 상태 판별(열림·거부)')
+
+print('== 수집 서버 ACL: Juniper term 직접 주소·여러 prefix-list, 서버 출발 IP')
+B.v3_ok = lambda host, c: V3.get(host, (None, 'No SNMP response received before timeout'))
+os.environ.update(NET_USER='netadmin', NET_PASS='SshPass!9', COLLECTOR_IPS='10.9.9.9')
+HOSTCFG['127.0.0.52'] = {'show configuration snmp | display set': 'set snmp v3 usm local-engine user ipam-ro authentication-sha',
+    'show configuration interfaces lo0 | display set': 'set interfaces lo0 unit 0 family inet filter input-list RE-1\nset interfaces lo0 unit 0 family inet filter input-list RE-2',
+    'show configuration firewall | display set':
+        'set firewall family inet filter RE-1 term nms from source-address 165.246.1.10/32\n'
+        'set firewall family inet filter RE-1 term nms from protocol udp\n'
+        'set firewall family inet filter RE-1 term nms from destination-port 161\n'
+        'set firewall family inet filter RE-1 term nms then accept\n'
+        'set firewall filter RE-2 term snmp from source-prefix-list NMS-A\n'
+        'set firewall filter RE-2 term snmp from source-prefix-list NMS-B\n'
+        'set firewall filter RE-2 term snmp from port snmp\n'
+        'set firewall filter RE-2 term snmp then accept'}
+pd.DataFrame([{'ip': '127.0.0.52', 'name': 'ex3300', 'vendor': 'juniper_junos'}]).to_excel('dev8.xlsx', index=False)
+SESSIONS.clear()
+res = B.main(['dev8.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn2)
+jx = SESSIONS[0].sent
+ok('set firewall family inet filter RE-1 term nms from source-address 10.9.9.9/32' in jx,
+   'Juniper: SNMP term 에 주소를 직접 적은 필터 → 그 term 에 수집 서버 주소 추가', jx)
+ok('set policy-options prefix-list NMS-A 10.9.9.9/32' in jx and 'set policy-options prefix-list NMS-B 10.9.9.9/32' in jx
+   and not any('usm local-engine' in x for x in jx), 'Juniper: SNMP 허용 prefix-list 가 여럿이면 모두에 추가(계정 있으면 계정은 그대로)', jx)
+B.v3_ok = real_v3_ok
+os.environ.update(IPAM_SNMP_USER='ipam-ro', IPAM_SNMP_AUTH='Auth#Pass2026', IPAM_SNMP_PRIV='Priv#Pass2026')
+if os.path.exists('collector_ips.txt'):
+    os.remove('collector_ips.txt')
+res = B.main(['dev7.xlsx', '--verify-only', '--snmp-port', '1161'])
+ok(open('collector_ips.txt').read().strip() == '127.0.0.1' and res[0].get('src_ip') == '127.0.0.1',
+   '--verify-only: 이 서버가 장비로 보내는 출발 IP 를 collector_ips.txt 로 남김', open('collector_ips.txt').read())
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")
