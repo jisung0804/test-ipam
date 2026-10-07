@@ -24,7 +24,12 @@ class FakeConn:
         SESSIONS.append(self)
     def __enter__(self): return self
     def __exit__(self, *a): pass
-    def enable(self): self.sent.append('<enable>')
+    def enable(self):
+        self.sent.append('<enable>')
+        if self.kw['host'] == '127.0.0.46':
+            raise ValueError('Failed to enter enable mode. Please ensure you pass the \'secret\' argument')
+        self.en = True
+    def check_enable_mode(self): return getattr(self, 'en', False)
     def send_command(self, cmd):
         self.sent.append('<show> ' + cmd)
         if cmd == 'show ip authorized-managers':
@@ -58,7 +63,12 @@ class FakeConn:
             return 'User creation is done. SNMPv3 is now functional.\nWould you like to restrict SNMPv1 and SNMPv2c messages to have read only access (you can set this later by the command \'snmp restrict-access\')? [y/n]'
         return 'switch(config)#'
     def send_config_set(self, cmds, exit_config_mode=True):
+        if self.kw['host'] == '127.0.0.47':
+            raise ValueError('Failed to enter configuration mode.')
         self.sent.extend(cmds)
+        if self.kw['host'] == '127.0.0.48' and any(x.startswith('acl basic') for x in cmds):
+            return "system-view\nSystem View: return to User View with Ctrl+Z.\n[SW48]acl basic 2999\n             ^\n % Unrecognized command found at '^' position."
+
         if self.kw['host'] == '127.0.0.30':
             return '% Invalid input detected at \'^\' marker.'
         return 'ok'
@@ -255,4 +265,25 @@ prev = pd.DataFrame([{'ip': '127.0.0.40', 'vendor': 'hp_comware', 'status': '오
 pd.DataFrame([{'ip': '127.0.0.40', 'name': 'cw5'}]).to_excel('dev4.xlsx', index=False)
 class _A: from_netbox = False; inventory = 'dev4.xlsx'; only_failed = 'prev.xlsx'; limit = 0
 ok(B.load_inventory(_A())[0]['vendor'] == 'hp_comware', '--only-failed: 지난 결과의 장비 종류를 다시 판별하지 않고 사용')
+
+print('== 현장 오류 대응 2: 설정 모드 진입 실패 · Comware acl 문법')
+os.environ.update(IPAM_SNMP_AUTH='Auth#Pass2026', IPAM_SNMP_PRIV='Priv#Pass2026', COLLECTOR_IPS='10.9.9.9')
+HOSTCFG['127.0.0.48'] = {'display version': 'Copyright (c) 2004-2015 Hewlett-Packard Development Company\nHP 1920-48G Switch',
+                         'display current-configuration | include snmp': ' snmp-agent usm-user v3 ipam-ro IPAM-RO acl 2999'}
+pd.DataFrame([{'ip': '127.0.0.46', 'name': 'xe-noen', 'vendor': 'cisco_xe'},
+              {'ip': '127.0.0.47', 'name': 'xe-lock', 'vendor': 'cisco_xe'},
+              {'ip': '127.0.0.48', 'name': 'cw-old', 'vendor': 'hp_comware'}]).to_excel('dev5.xlsx', index=False)
+SESSIONS.clear()
+V3['127.0.0.48'] = ('sw-48', None)
+res = {r['ip']: r for r in B.main(['dev5.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn2)}
+by = {s.kw['host']: s for s in SESSIONS}
+ok(res['127.0.0.46']['status'] == '조치 필요' and 'NET_SECRET' in res['127.0.0.46']['detail'],
+   "Cisco '>' 모드에서 enable 실패 → 'Failed to enter configuration mode' 대신 NET_SECRET·privilege 15 안내", res['127.0.0.46'])
+ok(by['127.0.0.46'].kw.get('secret') == os.environ['NET_PASS'], 'NET_SECRET 이 없으면 로그인 비밀번호로 enable 시도', by['127.0.0.46'].kw)
+ok(res['127.0.0.47']['status'] == '조치 필요' and 'configuration lock' in res['127.0.0.47']['detail'],
+   '설정 모드 진입 실패 → 원인(enable·설정 잠금·AAA 권한) 안내', res['127.0.0.47'])
+cw = by['127.0.0.48'].sent
+ok('acl basic 2999' in cw and 'acl number 2999' in cw and res['127.0.0.48']['status'] == '적용 완료'
+   and 'acl number' in res['127.0.0.48']['detail'], "Comware: 'acl basic' 거부되면 'acl number' 로 자동 재적용", (cw, res['127.0.0.48']))
+ok('<save>' in cw, 'Comware: 재적용 성공 후 저장', cw)
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")

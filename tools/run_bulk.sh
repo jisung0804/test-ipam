@@ -71,6 +71,9 @@ ask() {  # 이름 설명 숨김여부
 }
 ask NET_USER 'SSH 계정(NET_USER)' 0
 ask NET_PASS 'SSH 비밀번호(NET_PASS)' 1
+if [ -z "${NET_SECRET+x}" ]; then
+  read -r -s -p 'Cisco enable 비밀번호(NET_SECRET, 없거나 로그인 비밀번호와 같으면 Enter): ' NET_SECRET; echo; export NET_SECRET
+fi
 ask COLLECTOR_IPS '수집 서버 IP(COLLECTOR_IPS, 쉼표로 여러 개)' 0
 if [ -z "${IPAM_SNMP_AUTH:-}" ]; then
   echo "SNMPv3 계정 — 장비에 계정이 없을 때 만들고, 적용 후 응답을 확인하는 데 씀 (모르면 Enter 로 건너뜀)"

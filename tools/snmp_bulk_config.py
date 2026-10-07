@@ -322,8 +322,8 @@ def _tcp_fail(e):
 def _open(connect, dtype, host, c):
     """SSH 로 접속, 안 되고 --telnet 이면 텔넷으로 다시. 반환 (연결, 실제 방식)"""
     params = dict(device_type=dtype, host=host, username=c.ssh_user, password=c.ssh_pass, timeout=30, fast_cli=False)
-    if c.secret:
-        params['secret'] = c.secret
+    if c.secret or dtype.startswith('cisco'):
+        params['secret'] = c.secret or c.ssh_pass     # enable 비밀번호가 없으면 로그인 비밀번호로 시도(TACACS 등)
     try:
         return connect(**params), 'ssh'
     except Exception as e:
@@ -407,8 +407,13 @@ def inspect(conn, dtype, c, bak):
                                       '→ --junos-prefix-list 로 지정')
     elif dtype == 'hp_comware':
         v = conn.send_command('display version')
-        m = re.search(r'Comware\s+(?:Platform\s+)?Software,?\s+Version\s+(\d+)', v, re.I)
-        f['ver'] = int(m.group(1)) if m else 7
+        m = re.search(r'(?:Comware|Versatile Routing Platform)\b.*?Version\s+(\d+)\.', v, re.I | re.S)
+        f['ver'] = int(m.group(1)) if m else None
+        if f['ver'] is None:
+            first = next((x.strip() for x in v.splitlines() if x.strip()), '')[:60]
+            f['notes'].append(f'Comware 버전 모름({first}) → acl basic 시도, 거부되면 acl number')
+        elif f['ver'] <= 5:
+            f['ver'] = 5
         um = re.search(rf'usm-user v3 {re.escape(u)} (\S+)(.*)$', bak, re.M)
         f['user'] = bool(um)
         acls = []
@@ -502,8 +507,8 @@ def push(host, dtype, cmds, c, backup_dir, connect=None):
     if how == 'telnet':
         notes.append('SSH 안 됨 → 텔넷으로 접속')
     with conn:
-        if c.secret and dtype.startswith('cisco'):
-            conn.enable()
+        if dtype.startswith('cisco'):
+            _cisco_enable(conn, c)
         bak = ''
         try:
             bak = conn.send_command(BACKUP_CMD[dtype])
@@ -527,12 +532,18 @@ def push(host, dtype, cmds, c, backup_dir, connect=None):
                 log.append(conn.send_config_set(cmds + extra, exit_config_mode=False))
             conn.exit_config_mode()
         elif cmds + extra:
-            log.append(conn.send_config_set(cmds + extra, exit_config_mode=dtype != 'juniper_junos'))
+            res = _config(conn, cmds + extra, dtype, c)
+            if dtype == 'hp_comware' and _rejected(res) and any(x.startswith('acl basic') for x in cmds):
+                # 'acl basic' 을 모르는 Comware(5 이하·일부 7) → 'acl number' 문법으로 한 번 더
+                cmds = [('acl number' + x[len('acl basic'):]) if x.startswith('acl basic') else
+                        x.replace(' simple authentication-mode', ' authentication-mode') for x in cmds]
+                notes.append("'acl basic' 거부 → 'acl number' 문법으로 다시 적용")
+                res = _config(conn, cmds + extra, dtype, c)
+            log.append(res)
         else:
             return '\n'.join(log) + '\n(넣을 명령 없음)', [], notes, f
         out = '\n'.join(log)
-        bad = re.search(r'^.*(% ?Invalid|% ?Incomplete|syntax error|Unrecognized command|unknown command|Error:|'
-                        r'Wrong parameter|% ?Too many parameters|% ?Ambiguous).*$', out, re.I | re.M)
+        bad = _rejected(out)
         if bad:
             # 거부된 줄 바로 앞 명령을 함께 보여 준다
             pre = out[:bad.start()].rstrip().splitlines()[-2:]
@@ -542,6 +553,45 @@ def push(host, dtype, cmds, c, backup_dir, connect=None):
         else:
             out += conn.save_config()
     return out, cmds + extra, notes, f
+
+
+REJECT = re.compile(r'^.*(% ?Invalid|% ?Incomplete|syntax error|Unrecognized command|unknown command|Error:|'
+                    r'Wrong parameter|% ?Too many parameters|% ?Ambiguous).*$', re.I | re.M)
+
+
+def _rejected(out):
+    return REJECT.search(out or '')
+
+
+def _cisco_enable(conn, c):
+    """설정 모드에 들어가려면 privileged(#) 모드여야 한다. enable 비밀번호(NET_SECRET) → 없으면 로그인 비밀번호로 시도"""
+    try:
+        if conn.check_enable_mode():
+            return
+    except Exception:
+        pass
+    try:
+        conn.enable()
+        if conn.check_enable_mode():
+            return
+    except Exception:
+        pass
+    raise NeedAction("Cisco: 로그인 후 '>'(사용자 모드)에서 enable 에 실패 — NET_SECRET 에 enable 비밀번호를 넣거나, "
+                     'SSH 계정을 privilege 15 로 설정(TACACS 면 권한 확인)')
+
+
+def _config(conn, cmds, dtype, c):
+    try:
+        return conn.send_config_set(cmds, exit_config_mode=dtype != 'juniper_junos')
+    except ValueError as e:
+        if 'configuration mode' not in str(e):
+            raise
+        raise NeedAction('설정 모드 진입 실패 — ' + {
+            'cisco': "enable(#) 상태가 아니거나, 다른 세션이 설정을 잠금(show configuration lock), "
+                     "또는 AAA 명령 권한(TACACS)으로 'configure terminal' 이 막힘",
+            'hp_comware': "계정 권한 부족(Comware 5: 'super 3' 필요 / 7: network-admin 역할) — 장비 계정 권한 확인",
+            'juniper_junos': "계정 클래스가 configure 권한이 없음(read-only)",
+        }.get('cisco' if dtype.startswith('cisco') else dtype, '계정 권한 확인') + f' [{e}]')
 
 
 def _local_ip(host, port=161):
