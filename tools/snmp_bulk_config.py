@@ -295,7 +295,7 @@ def detect(host, c, given='', connect=None):
     if 'SSHException' in msg or 'Incompatible ssh' in msg:
         msg = LEGACY_SSH_HINT + ' | ' + msg
     elif _tcp_fail(Exception(msg)):
-        msg = TCP_FAIL_HINT + ' | ' + msg
+        msg = _tcp_hint(host) + ' | ' + _short(err)
     else:
         msg += ' → 목록 엑셀의 vendor 칸에 적어 주세요 (cisco_ios, cisco_xe, juniper_junos, hp_comware, hp_procurve, aruba_aoscx …)'
     return None, msg
@@ -317,6 +317,57 @@ TELNET = {'cisco_ios': 'cisco_ios_telnet', 'cisco_xe': 'cisco_xe_telnet', 'cisco
 TCP_FAIL_HINT = ('SSH(22) 접속 자체가 안 됨 — 이 PC 가 장비 vty ACL(line vty access-class / Juniper lo0 필터 / '
                  'Comware user-interface acl)에 없거나, 장비에 SSH 가 꺼져 있거나, 경로·방화벽 문제. '
                  '예전에 접속되던 PC 에서 실행하거나, 텔넷만 되는 장비면 --telnet')
+
+
+def _short(err):
+    """netmiko 의 긴 안내문(Common causes …)을 잘라 첫 줄만"""
+    return (str(err).strip().splitlines() or [''])[0][:160]
+
+
+def port_state(host, port, timeout=3):
+    """'열림' / '거부'(장비가 RST — 서비스 꺼짐) / '응답 없음'(필터·ACL 이 버림) / '도달 불가'(경로 없음)"""
+    import errno
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        r = s.connect_ex((host, port))
+    except socket.timeout:
+        return '응답 없음'
+    except OSError:
+        return '도달 불가'
+    finally:
+        s.close()
+    if r == 0:
+        return '열림'
+    if r == errno.ECONNREFUSED:
+        return '거부'
+    if r in (errno.EHOSTUNREACH, errno.ENETUNREACH):
+        return '도달 불가'
+    return '응답 없음'
+
+
+def _tcp_hint(host, dtype=''):
+    """SSH 접속 실패를 포트 상태로 구분해 원인과 확인 명령을 알려 준다"""
+    p22, p23 = port_state(host, 22), port_state(host, 23)
+    head = f'SSH 접속 불가 (22번 {p22}, 23번 {p23})'
+    jun = dtype.startswith('juniper') if dtype else False
+    if p22 == '열림':
+        why = '포트는 열려 있음 → 잠깐 막혔던 것(동시 접속 수·rate-limit)일 수 있음. --workers 3 으로 다시'
+    elif p22 == '거부':
+        why = ('장비에 SSH 서비스가 꺼져 있음' + (" (Junos: 'set system services ssh')" if jun else '')
+               + (' — 텔넷은 열려 있으니 --telnet 으로 가능' if p23 == '열림' else ''))
+    elif p22 == '도달 불가':
+        why = '이 PC 에서 장비까지 경로가 없음 (IP 오타·라우팅·VPN 확인)'
+    else:
+        why = ('필터가 이 PC 를 막음 — Juniper 는 lo0 방화벽 필터의 SSH 허용 prefix-list 에 이 PC IP 가 없을 때 '
+               "이렇게 됨 (장비에서 'show configuration interfaces lo0', 'show configuration firewall | display set | "
+               "match ssh' 확인 → 그 prefix-list 에 이 PC 추가하거나 허용된 PC 에서 실행)"
+               if jun or not dtype else
+               "vty ACL·방화벽이 이 PC 를 막음 (Cisco 'show run | sec line vty' 의 access-class 확인 → 허용된 PC 에서 실행)")
+        if p23 == '열림':
+            why += ' / 텔넷은 열려 있음 → --telnet'
+    return f'{head}: {why}'
 
 
 def _tcp_fail(e):
@@ -760,8 +811,9 @@ def handle(row, c, backup_dir, connect=None):
     except Exception as e:
         msg = f'{type(e).__name__}: {e}'
         if _tcp_fail(e):
-            msg = TCP_FAIL_HINT + ' | ' + msg
-        res.update(status='오류', detail=mask(msg, c)[:600])
+            res.update(status='접속 불가', detail=mask(_tcp_hint(host, dtype=res.get('vendor')) + ' | ' + _short(msg), c)[:600])
+        else:
+            res.update(status='오류', detail=mask(msg, c)[:600])
     if 'SSHException' in res['detail'] or 'Incompatible ssh' in res['detail']:
         res['detail'] = (LEGACY_SSH_HINT + ' | ' + res['detail'])[:600]
     return res

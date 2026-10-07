@@ -217,6 +217,8 @@ class FakeConn2(FakeConn):
             TELNET_USED.append(kw['device_type'])
         super().__init__(**kw)
 
+_ps = B.port_state
+B.port_state = lambda h, p, timeout=3: ('응답 없음' if p == 22 else '열림') if h == '127.0.0.44' else _ps(h, p, timeout)
 SESSIONS.clear()
 V3['127.0.0.41'] = (None, 'Unknown USM user name')
 res = {r['ip']: r for r in B.main(['dev2.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn2)}
@@ -238,8 +240,9 @@ jx = by['127.0.0.42'].sent
 ok('set policy-options prefix-list SNMP-MGR 10.9.9.9/32' in jx, 'Juniper: lo0 필터에서 SNMP 허용 prefix-list(SNMP-MGR)를 찾아 추가', jx)
 ok(any('usm local-engine user ipam-ro' in x for x in jx) and '<commit>' in jx and '계정도 추가' in res['127.0.0.42']['detail'],
    "Juniper: 계정이 없으면(Unknown USM user·'넣을 명령 없음' 원인) 계정도 추가 후 commit", res['127.0.0.42'])
-ok(res['127.0.0.44']['status'] == '오류' and 'vty' in res['127.0.0.44']['detail'] and '--telnet' in res['127.0.0.44']['detail'],
-   'TCP 접속 실패: 원인(vty ACL·SSH 꺼짐)과 --telnet 안내', res['127.0.0.44'])
+ok(res['127.0.0.44']['status'] == '접속 불가' and '22번 응답 없음' in res['127.0.0.44']['detail']
+   and 'vty' in res['127.0.0.44']['detail'] and '--telnet' in res['127.0.0.44']['detail'],
+   'TCP 접속 실패: 포트 상태(22 응답 없음=필터, 23 열림)로 원인 구분 + --telnet 안내', res['127.0.0.44'])
 
 SESSIONS.clear(); TELNET_USED.clear()
 V3['127.0.0.44'] = ('sw-44', None)
@@ -324,4 +327,16 @@ os.environ.pop('NET_USER'); os.environ.pop('NET_PASS')
 res = {r['ip']: r for r in B.main(['dev7.xlsx', '--verify-only', '--snmp-port', '1161'], connect=FakeConn2)}
 ok(res['127.0.0.11']['status'] == '응답 확인' and res['127.0.0.99']['status'] == '응답 없음' and not SESSIONS,
    '--verify-only: SSH 접속 없이 SNMPv3 응답 여부만 (SSH 계정 불필요)', res)
+
+print('== SSH 접속 불가 원인 구분 (EX3300 등)')
+B.port_state = lambda h, p, timeout=3: {22: '응답 없음', 23: '응답 없음'}[p]
+ok('lo0' in B._tcp_hint('1.1.1.1', 'juniper_junos') and 'prefix-list' in B._tcp_hint('1.1.1.1', 'juniper_junos'),
+   'Juniper + 22번 응답 없음 → lo0 필터 SSH 허용 목록 안내')
+B.port_state = lambda h, p, timeout=3: {22: '거부', 23: '열림'}[p]
+ok("system services ssh" in B._tcp_hint('1.1.1.1', 'juniper_junos') and '--telnet' in B._tcp_hint('1.1.1.1', 'juniper_junos'),
+   '22번 거부 → SSH 서비스 꺼짐, 텔넷 열림이면 --telnet')
+B.port_state = _ps
+import socket as _so
+_srv = _so.socket(); _srv.bind(('127.0.0.1', 0)); _srv.listen()
+ok(B.port_state('127.0.0.1', _srv.getsockname()[1]) == '열림' and B.port_state('127.0.0.1', 1) == '거부', '실제 포트 상태 판별(열림·거부)')
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")
