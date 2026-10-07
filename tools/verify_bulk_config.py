@@ -66,6 +66,13 @@ class FakeConn:
         if self.kw['host'] == '127.0.0.47':
             raise ValueError('Failed to enter configuration mode.')
         self.sent.extend(cmds)
+        h = self.kw['host']
+        if h == '127.0.0.49' and any(' simple ' in x for x in cmds):
+            x = next(x for x in cmds if ' simple ' in x)
+            return f"[V170-2]{x}\n" + ' ' * (8 + x.index(' simple ') + 1) + "^\n % Unrecognized command found at '^' position."
+        if h == '127.0.0.51' and any('usm-user' in x for x in cmds):
+            x = next(x for x in cmds if 'usm-user' in x)
+            return f"[SW51]{x}\n" + ' ' * (6 + x.index('aes128')) + "^\n % Unrecognized command found at '^' position."
         if self.kw['host'] == '127.0.0.48' and any(x.startswith('acl basic') for x in cmds):
             return "system-view\nSystem View: return to User View with Ctrl+Z.\n[SW48]acl basic 2999\n             ^\n % Unrecognized command found at '^' position."
 
@@ -225,7 +232,7 @@ ok('ip access-list standard 10' in xe and any(re.fullmatch(r' 1[1-9] permit 10\.
 ok(not any('IPAM-SNMP' in x for x in xe), 'Cisco XE: 쓰지 않는 IPAM-SNMP ACL 은 만들지 않음', xe)
 ok('ip access-list standard SNMP-USR' in xe and ' permit 10.9.9.9' in xe, "Cisco XE: 계정에 직접 걸린 ACL(show snmp user 의 access-list)에도 추가", xe)
 d41 = res['127.0.0.41']['detail']
-ok(res['127.0.0.41']['status'] == '적용 후 확인 실패' and '이 PC' in d41 and 'COLLECTOR_IPS' in d41,
+ok(res['127.0.0.41']['status'] == '적용(서버에서 확인 필요)' and '이 PC' in d41 and '--verify-only' in d41,
    'Unknown USM user: 확인 요청을 보낸 PC 가 수집 서버가 아니면 그 사실과 서버에서 확인하는 방법 안내', d41)
 jx = by['127.0.0.42'].sent
 ok('set policy-options prefix-list SNMP-MGR 10.9.9.9/32' in jx, 'Juniper: lo0 필터에서 SNMP 허용 prefix-list(SNMP-MGR)를 찾아 추가', jx)
@@ -286,4 +293,35 @@ cw = by['127.0.0.48'].sent
 ok('acl basic 2999' in cw and 'acl number 2999' in cw and res['127.0.0.48']['status'] == '적용 완료'
    and 'acl number' in res['127.0.0.48']['detail'], "Comware: 'acl basic' 거부되면 'acl number' 로 자동 재적용", (cw, res['127.0.0.48']))
 ok('<save>' in cw, 'Comware: 재적용 성공 후 저장', cw)
+
+print('== 현장 오류 대응 3: Comware 계정 문법·거부 위치·목록 빈 줄·서버 확인')
+for h in ('127.0.0.49', '127.0.0.51'):
+    HOSTCFG[h] = {'display version': 'HPE Comware Software, Version 7.1.045, Release 3208',
+                  'display current-configuration | include snmp': ''}
+pd.DataFrame([{'ip': '127.0.0.49', 'name': 'V170-2', 'vendor': 'hp_comware'},
+              {'ip': '127.0.0.51', 'name': 'cw-noaes', 'vendor': 'hp_comware'},
+              {'ip': '', 'name': '빈줄', 'vendor': ''},
+              {'ip': '165.246.1.300', 'name': '오타', 'vendor': 'cisco_ios'}]).to_excel('dev6.xlsx', index=False)
+SESSIONS.clear()
+V3['127.0.0.49'] = ('V170-2', None)
+res = B.main(['dev6.xlsx', '--apply', '--acl-only', '--force', '--snmp-port', '1161'], connect=FakeConn2)
+byip = {r['ip']: r for r in res}
+by = {s.kw['host']: s for s in SESSIONS}
+s49 = by['127.0.0.49'].sent
+ok(byip['127.0.0.49']['status'] == '적용 완료' and any('usm-user v3 ipam-ro IPAM-RO authentication-mode sha' in x for x in s49)
+   and "'simple'" in byip['127.0.0.49']['detail'], "Comware 계정 명령 거부 → 'simple' 키워드를 바꿔 계정 줄만 다시 적용", (s49, byip['127.0.0.49']))
+d51 = byip['127.0.0.51']['detail']
+ok(byip['127.0.0.51']['status'] == '오류' and "'aes128' 부분" in d51 and 'AES' in d51 and 'Priv#Pass2026' not in d51,
+   "거부 위치('^')의 단어를 알려 줌 — AES 미지원 장비 안내, 비밀번호는 가림", d51)
+ok('' not in byip and len(res) == 3, '목록의 빈 줄은 제외 (Either ip or host must be set 방지)', list(byip))
+ok(byip['165.246.1.300']['status'] == '목록 오류', '잘못된 IP 는 접속하지 않고 목록 오류로 표시', byip['165.246.1.300'])
+
+print('== --verify-only (수집 서버에서 SNMPv3 응답만 확인)')
+B.v3_ok = real_v3_ok
+pd.DataFrame([{'ip': '127.0.0.11', 'name': 'core'}, {'ip': '127.0.0.99', 'name': 'none'}]).to_excel('dev7.xlsx', index=False)
+SESSIONS.clear()
+os.environ.pop('NET_USER'); os.environ.pop('NET_PASS')
+res = {r['ip']: r for r in B.main(['dev7.xlsx', '--verify-only', '--snmp-port', '1161'], connect=FakeConn2)}
+ok(res['127.0.0.11']['status'] == '응답 확인' and res['127.0.0.99']['status'] == '응답 없음' and not SESSIONS,
+   '--verify-only: SSH 접속 없이 SNMPv3 응답 여부만 (SSH 계정 불필요)', res)
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")

@@ -59,6 +59,7 @@ class Cfg:
         self.junos_prefix_list = a.junos_prefix_list
         self.comware_acl = a.comware_acl
         self.telnet = getattr(a, 'telnet', False)
+        self.verify_only = getattr(a, 'verify_only', False)
 
     def check(self):
         bad = []
@@ -72,6 +73,10 @@ class Cfg:
             bad.append('COLLECTOR_IPS 에 수집 서버(또는 PC) IP 를 넣을 것')
         if self.acl_only:
             bad = [b for b in bad if 'IPAM_SNMP_AUTH' not in b and '비밀번호에' not in b]
+        if self.verify_only:
+            bad = [b for b in bad if 'COLLECTOR_IPS' not in b]
+            if not (self.auth and self.priv):
+                bad.append('--verify-only 에는 IPAM_SNMP_USER / IPAM_SNMP_AUTH / IPAM_SNMP_PRIV 필요')
         if self.apply and not (self.ssh_user and self.ssh_pass):
             bad.append('--apply 에는 NET_USER / NET_PASS 필요')
         return bad
@@ -533,21 +538,15 @@ def push(host, dtype, cmds, c, backup_dir, connect=None):
             conn.exit_config_mode()
         elif cmds + extra:
             res = _config(conn, cmds + extra, dtype, c)
-            if dtype == 'hp_comware' and _rejected(res) and any(x.startswith('acl basic') for x in cmds):
-                # 'acl basic' 을 모르는 Comware(5 이하·일부 7) → 'acl number' 문법으로 한 번 더
-                cmds = [('acl number' + x[len('acl basic'):]) if x.startswith('acl basic') else
-                        x.replace(' simple authentication-mode', ' authentication-mode') for x in cmds]
-                notes.append("'acl basic' 거부 → 'acl number' 문법으로 다시 적용")
-                res = _config(conn, cmds + extra, dtype, c)
+            if dtype == 'hp_comware':
+                res, cmds = _comware_retry(conn, res, cmds, extra, c, notes)
             log.append(res)
         else:
             return '\n'.join(log) + '\n(넣을 명령 없음)', [], notes, f
         out = '\n'.join(log)
         bad = _rejected(out)
         if bad:
-            # 거부된 줄 바로 앞 명령을 함께 보여 준다
-            pre = out[:bad.start()].rstrip().splitlines()[-2:]
-            raise RuntimeError('장비가 명령을 거부: ' + ' / '.join(x.strip() for x in pre + [bad.group(0)]))
+            raise RuntimeError(_reject_msg(out, bad, c))
         if dtype == 'juniper_junos':
             out += conn.commit(and_quit=True)
         else:
@@ -561,6 +560,82 @@ REJECT = re.compile(r'^.*(% ?Invalid|% ?Incomplete|syntax error|Unrecognized com
 
 def _rejected(out):
     return REJECT.search(out or '')
+
+
+PROMPT = re.compile(r'^(\[[^\]]*\]|<[^>]*>|\S+\(config[^)]*\)#|\S+#)\s*')
+
+
+def _bad_cmd(out, bad):
+    """거부 메시지 앞의 (명령 줄, '^' 가 가리키는 단어)"""
+    lines = out[:bad.start()].rstrip('\n').splitlines()
+    caret, cmd = None, ''
+    for ln in reversed(lines):
+        if re.fullmatch(r'\s*\^\s*', ln):
+            caret = ln.index('^')
+            continue
+        if ln.strip():
+            cmd = ln
+            break
+    word = ''
+    if caret is not None and caret < len(cmd):
+        st = cmd.rfind(' ', 0, caret) + 1
+        en = cmd.find(' ', caret)
+        word = cmd[st:en if en >= 0 else None]
+    return PROMPT.sub('', cmd.strip()), word
+
+
+def _reject_msg(out, bad, c):
+    cmd, word = _bad_cmd(out, bad)
+    msg = f'장비가 명령을 거부: {mask(cmd, c)}' + (f"  ← '{mask(word, c)}' 부분" if word else '') + f' ({bad.group(0).strip()})'
+    if word in ('aes128', 'privacy-mode', 'aes'):
+        msg += ' — 이 장비는 SNMPv3 AES 암호화를 지원하지 않음(펌웨어 확인). 수집 서버는 AES 만 쓰므로 수동 처리 필요'
+    elif word in ('sha', 'authentication-mode'):
+        msg += ' — 이 장비는 SHA 인증을 지원하지 않음(펌웨어 확인)'
+    return msg
+
+
+def _comware_retry(conn, res, cmds, extra, c, notes):
+    """Comware 는 버전·모델마다 문법이 다르다. 거부된 명령을 보고 다른 문법으로 다시 넣는다(최대 3번)"""
+    for _ in range(3):
+        bad = _rejected(res)
+        if not bad:
+            break
+        line, word = _bad_cmd(res, bad)
+        if line.startswith('acl basic'):
+            # 'acl basic' 을 모르는 Comware(5 이하·일부 7) → 'acl number', 계정 명령의 'simple' 도 뺌
+            cmds = [('acl number' + x[len('acl basic'):]) if x.startswith('acl basic') else
+                    x.replace(' simple authentication-mode', ' authentication-mode') for x in cmds]
+            notes.append("'acl basic' 거부 → 'acl number' 문법으로 다시 적용")
+            res = _config(conn, cmds + extra, 'hp_comware', c)
+            continue
+        if 'usm-user v3' in line and word not in ('aes128', 'sha'):
+            # 'simple' 키워드: Comware 7 은 필요, 5 는 없음 → 반대로 바꿔 계정 줄만 다시
+            orig = next((x for x in cmds if 'usm-user v3' in x), '')
+            if ' simple authentication-mode' in orig:
+                alt = orig.replace(' simple authentication-mode', ' authentication-mode')
+            else:
+                alt = re.sub(r'(usm-user v3 \S+ \S+) authentication-mode', r'\1 simple authentication-mode', orig)
+            if alt == orig or alt in cmds:
+                break
+            r2 = _config(conn, [alt], 'hp_comware', c)
+            if _rejected(r2):
+                # 끝의 'acl N' 을 빼고 한 번 더 (계정 ACL 을 지원하지 않는 모델)
+                alt2 = re.sub(r' acl \d+$', '', alt)
+                if alt2 != alt:
+                    r3 = _config(conn, [alt2], 'hp_comware', c)
+                    if not _rejected(r3):
+                        notes.append(f"계정 명령: 계정 ACL 미지원 모델 → acl 없이 적용(그룹·장비 ACL 로만 제한)")
+                        cmds = [alt2 if x == orig else x for x in cmds]
+                        res = res[:bad.start()] + r3
+                        continue
+                res = r2
+                break
+            notes.append("계정 명령 문법 차이 → 'simple' 키워드 " + ('뺌' if ' simple ' in orig else '넣음') + ' 으로 다시 적용')
+            cmds = [alt if x == orig else x for x in cmds]
+            res = res[:bad.start()] + r2
+            continue
+        break
+    return res, cmds
 
 
 def _cisco_enable(conn, c):
@@ -608,7 +683,25 @@ def _local_ip(host, port=161):
 
 def handle(row, c, backup_dir, connect=None):
     host, name = str(row['ip']).strip(), str(row.get('name') or '').strip()
-    res = {'ip': host, 'name': name, 'vendor': '', 'how': '', 'status': '', 'detail': '', 'commands': ''}
+    res = {'ip': host, 'name': name, 'vendor': str(row.get('vendor') or ''), 'how': '', 'status': '', 'detail': '',
+           'commands': ''}
+    import ipaddress
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        res.update(status='목록 오류', detail=f"ip 칸 값이 IP 주소가 아님: '{host}'")
+        return res
+    if c.verify_only:
+        sysname, err = v3_ok(host, c)
+        if sysname is not None:
+            res.update(status='응답 확인', detail=f'SNMPv3 응답: {sysname}')
+        else:
+            hint = ('장비에 계정이 없거나 이름·비밀번호가 다름, 또는 사용자/그룹 ACL 에 이 서버가 없음'
+                    if 'Unknown USM' in (err or '') else
+                    '비밀번호가 다름(auth/priv)' if 'Wrong' in (err or '') or 'decrypt' in (err or '').lower() else
+                    'ACL·방화벽에 이 서버가 없음, 또는 장비 SNMP 꺼짐·관리 VRF')
+            res.update(status='응답 없음', detail=f'{err} — {hint}')
+        return res
     try:
         if not c.force and c.auth and c.priv:
             sysname, _ = v3_ok(host, c)
@@ -645,8 +738,11 @@ def handle(row, c, backup_dir, connect=None):
         me = _local_ip(host, c.port)
         why = []
         if me and me not in c.collectors:
-            why.append(f'확인 요청은 이 PC({me})에서 보냄 — 이 PC 는 COLLECTOR_IPS 에 없어 ACL 에 막히는 것이 정상일 수 있음. '
-                       '수집 서버(NetBox 스크립트 \'SNMP 수집 점검\' → IP 직접 입력)에서 확인')
+            res.update(status='적용(서버에서 확인 필요)',
+                       detail=f'명령은 들어감. 확인 요청은 이 PC({me})에서 보냈는데 이 PC 는 수집 서버(COLLECTOR_IPS)가 아니라 '
+                              f'ACL 에 막히는 것이 정상일 수 있음 ({err}). 수집 서버에서 --verify-only 로 확인'
+                              + (f' / {note}' if note else ''))
+            return res
         if 'Unknown USM user' in (err or '') or 'unknownUserName' in (err or ''):
             if f.get('user') is False:
                 why.append(f'장비에 계정 {c.user} 없음')
@@ -705,9 +801,12 @@ def load_inventory(a):
         if 'ip' not in df.columns:
             raise SystemExit("목록 파일에 'ip' 열이 필요합니다")
     df = df.fillna('')
+    df['ip'] = [str(x).strip().split('/')[0].strip() for x in df['ip']]
+    df = df[df['ip'] != '']                                  # 빈 줄(엑셀 끝의 빈 행 등) 제외
     if a.only_failed:
         prev = pd.read_excel(a.only_failed, dtype=str).fillna('')
-        retry = set(prev.loc[~prev['status'].isin(['적용 완료', '이미 설정됨']), 'ip'])
+        done = ['적용 완료', '이미 설정됨', '응답 확인'] + ([] if getattr(a, 'verify_only', False) else ['적용(서버에서 확인 필요)'])
+        retry = set(prev.loc[~prev['status'].isin(done), 'ip'])
         df = df[df['ip'].isin(retry)].copy()
         if 'vendor' in prev.columns:          # 지난번에 알아낸 장비 종류는 다시 판별하지 않고 그대로 사용
             known = {r['ip']: r['vendor'] for _, r in prev.iterrows() if r.get('vendor')}
@@ -734,6 +833,8 @@ def main(argv=None, connect=None):
     ap.add_argument('--cisco-acl', default='IPAM-SNMP', help="Cisco 에서 쓸 표준 ACL 이름/번호 (기존 SNMP ACL 을 쓰려면 예: 10)")
     ap.add_argument('--junos-prefix-list', default='', help='Juniper lo0 필터가 SNMP 허용에 쓰는 prefix-list 이름')
     ap.add_argument('--comware-acl', default='2999', help="Comware 기본 ACL 번호 (0 이면 ACL 안 씀)")
+    ap.add_argument('--verify-only', action='store_true',
+                    help='장비에 접속하지 않고 SNMPv3 응답만 확인 (수집 서버에서 실행해 실제 수집 가능 여부 확인)')
     ap.add_argument('--telnet', action='store_true', help='SSH(22) 접속이 안 되는 장비는 텔넷(23)으로 다시 시도 (비밀번호가 평문으로 전송됨)')
     ap.add_argument('--out', default='', help='결과 파일 이름')
     a = ap.parse_args(argv)
