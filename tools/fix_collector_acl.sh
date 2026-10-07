@@ -5,6 +5,7 @@
 #
 #   bash ~/test-ipam/tools/fix_collector_acl.sh <서버계정@서버IP> [장비목록.xlsx] [옵션...]
 #   예) bash ~/test-ipam/tools/fix_collector_acl.sh ipam@165.246.12.104 devices.xlsx
+#       bash ~/test-ipam/tools/fix_collector_acl.sh ipam@165.246.12.104:2022 devices.xlsx      # SSH 포트가 22 가 아닐 때
 #       bash ~/test-ipam/tools/fix_collector_acl.sh ipam@165.246.12.104 devices.xlsx --limit 3     # 시범 3대
 #       bash ~/test-ipam/tools/fix_collector_acl.sh ipam@165.246.12.104 devices.xlsx --check-only  # 확인만
 #
@@ -18,7 +19,8 @@
 # 환경변수(선택): NBD=/opt/netbox-docker  SSH_PORT=22  COLLECTOR_IPS=추가로 허용할 IP(쉼표)
 # =====================================================================================
 set -uo pipefail
-SRV=${1:?사용법: fix_collector_acl.sh <서버계정@서버IP> [장비목록.xlsx] [옵션...]}; shift
+SRV=${1:?사용법: fix_collector_acl.sh <서버계정@서버IP[:SSH포트]> [장비목록.xlsx] [옵션...]}; shift
+if [[ "$SRV" =~ ^(.+):([0-9]+)$ ]]; then SRV=${BASH_REMATCH[1]}; SSH_PORT=${BASH_REMATCH[2]}; fi   # 계정@IP:포트
 INV=devices.xlsx
 if [ $# -ge 1 ] && [[ "$1" != --* ]]; then INV=$1; shift; fi
 CHECK_ONLY=0; PASS=()
@@ -64,7 +66,7 @@ echo "장비 목록: $INVP ($N 대)"
 [ "$N" -gt 0 ] || exit 1
 
 # ---- 서버 접속 (비밀번호는 한 번만 물어봄)
-echo "[1/4] 수집 서버 $SRV 접속"
+echo "[1/4] 수집 서버 $SRV 접속 (SSH 포트 ${SSH_PORT:-22})"
 "${SSH[@]}" true || { echo "서버 SSH 접속 실패"; exit 1; }
 "${SSH[@]}" "test -d $NBD" || { echo "서버에 $NBD 가 없음 — NBD=<netbox-docker 경로> 로 지정"; exit 1; }
 
