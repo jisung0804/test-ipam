@@ -47,7 +47,11 @@ try:
     ok(s['state'] == 'down' and 'RQ_DEFAULT_TIMEOUT' in s['detail'], '마지막 수집 오류(시간 초과) → 적색 + 조치 안내', s)
     Job.objects.filter(name=NAME).delete()
     job('scheduled', scheduled=now - dt.timedelta(minutes=30))
-    ok(collect_status()['state'] == 'down' and '멈춤' in collect_status()['detail'], '예약이 30분째 실행 안 됨 → 적색(작업자 멈춤)', collect_status())
+    ok(collect_status()['state'] == 'down' and 'netbox-worker' in collect_status()['detail'], '예약이 30분째 실행 안 됨 → 적색(작업자 재시작 안내)', collect_status())
+    from netbox_ip_request.jobs import clear_stale_jobs
+    n = clear_stale_jobs()
+    ok(n >= 1 and not Job.objects.filter(name=NAME, status='scheduled').exists(),
+       '끊긴 예약 정리(작업자 시작 시 자동) → NetBox 가 새로 예약할 수 있게', n)
     Job.objects.filter(name=NAME).delete()
     job('completed', started=now - dt.timedelta(minutes=2), completed=now - dt.timedelta(minutes=1), data={'ok': 10, 'failed': 0})
 

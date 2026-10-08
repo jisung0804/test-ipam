@@ -5,7 +5,7 @@ class IPRequestConfig(PluginConfig):
     name = 'netbox_ip_request'
     verbose_name = 'IP 발급 신청'
     description = 'IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정'
-    version = '0.5.3'
+    version = '0.5.4'
     base_url = 'ip-request'
     min_version = '4.5.0'
     default_settings = {
@@ -52,6 +52,18 @@ class IPRequestConfig(PluginConfig):
         # DB 준비(migrate) 직후 필요한 사용자 정의 필드·태그를 자동 생성 (netbox-docker는 시작할 때마다 migrate 실행)
         from django.db.models.signals import post_migrate
         post_migrate.connect(_ensure_objects, sender=self)
+        # 작업자(rqworker)가 시작될 때: 지난번 작업자가 멈추며 남긴 '끊긴 예약'을 정리해야
+        # NetBox 가 자동 작업(SNMP 수집 등)을 다시 예약한다 (안 하면 '이미 예약됨'으로 보고 영영 안 돎)
+        import sys
+        if any(a.endswith('rqworker') for a in sys.argv[:3]):
+            try:
+                from .jobs import clear_stale_jobs
+                n = clear_stale_jobs()
+                if n:
+                    import logging
+                    logging.getLogger('netbox_ip_request').warning('끊긴 자동 작업 %s건 정리 → 다시 예약됨', n)
+            except Exception:
+                pass
 
 
 def _ensure_objects(sender, **kwargs):

@@ -130,7 +130,7 @@ def collect_status(now=None):
     nxt = qs.filter(status__in=['scheduled', 'pending']).order_by('scheduled').first()
     if nxt and (nxt.scheduled or nxt.created) < now - dt.timedelta(minutes=10):
         return {'state': 'down', 'label': '중단',
-                'detail': f'예약된 수집({loc(nxt.scheduled or nxt.created)})이 실행되지 않음 — netbox-worker 가 멈춤'}
+                'detail': f'예약된 수집({loc(nxt.scheduled or nxt.created)})이 실행되지 않음 — netbox-worker 재시작 필요'}
     if last is None:
         if nxt:
             return {'state': 'running', 'label': '첫 수집 대기', 'detail': f'{loc(nxt.scheduled)} 예정'}
@@ -142,7 +142,35 @@ def collect_status(now=None):
         return {'state': 'down', 'label': '중단', 'detail': f'{loc(last.completed)} 수집 오류: {err or last.status}'}
     if now - last.completed > dt.timedelta(minutes=max(3 * _INTERVAL, 15)):
         return {'state': 'down', 'label': '중단',
-                'detail': f'마지막 수집 {loc(last.completed)} — {int((now - last.completed).total_seconds() // 60)}분째 수집 없음'}
+                'detail': f'마지막 수집 {loc(last.completed)} — {int((now - last.completed).total_seconds() // 60)}분째 수집 없음'
+                          + ('' if nxt else ' · 다음 수집 예약 없음 → netbox-worker 재시작(끊긴 예약 자동 정리)')}
     d = last.data or {}
     tail = f" · 장비 성공 {d.get('ok', '?')} / 실패 {d.get('failed', '?')}" if isinstance(d, dict) else ''
     return {'state': 'ok', 'label': '정상', 'detail': f'마지막 수집 {loc(last.completed)}{tail}'}
+
+
+def clear_stale_jobs(now=None):
+    """끊긴 자동 작업을 '오류'로 정리 → 작업자 시작 시 NetBox 가 새로 예약. 반환: 정리 건수
+    - 실행 중인데 주기의 6배(최소 2시간)가 지나도 안 끝난 작업
+    - 예정 시각이 30분 넘게 지났는데 실행되지 않은 대기·예약 작업 (Redis 큐가 비워진 경우 등)"""
+    import datetime as dt
+    from django.utils import timezone
+    from core.models import Job
+    from netbox.registry import registry
+    now = now or timezone.now()
+    n = 0
+    for cls, kw in registry['system_jobs'].items():
+        if not cls.__module__.startswith('netbox_ip_request'):
+            continue
+        iv = kw.get('interval') or 5
+        for j in Job.objects.filter(name=cls.name, status__in=['pending', 'scheduled', 'running']):
+            if j.status == 'running':
+                bad = (j.started or j.created) < now - dt.timedelta(minutes=max(120, 6 * iv))
+            else:
+                bad = (j.scheduled or j.created) < now - dt.timedelta(minutes=30)
+            if bad:
+                j.status, j.completed = 'errored', now
+                j.error = '작업자 중단으로 끊긴 작업 — 자동 정리'
+                j.save()
+                n += 1
+    return n
