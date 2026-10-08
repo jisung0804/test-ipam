@@ -13,14 +13,15 @@ class IPRequestTable(NetBoxTable):
     building = tables.Column(linkify=True, verbose_name='건물')
     tenant = tables.Column(linkify=True)
     ip_address = tables.Column(linkify=True)
+    ip_addresses = columns.ManyToManyColumn(linkify_item=True, verbose_name='발급 IP 목록')
 
     class Meta(NetBoxTable.Meta):
         model = IPRequest
         fields = ('pk', 'id', 'status', 'requester', 'requester_name', 'requester_dept', 'requester_email',
-                  'requester_phone', 'building', 'room', 'room_name', 'tenant', 'prefix', 'match_note', 'mac', 'hostname', 'purpose',
-                  'period_days', 'expires_on', 'ip_address', 'approver', 'notify_result', 'created')
-        default_columns = ('id', 'status', 'requester_name', 'requester_dept', 'building', 'room', 'prefix', 'mac', 'purpose',
-                           'ip_address', 'expires_on', 'notify_result', 'created')
+                  'requester_phone', 'building', 'room', 'room_name', 'tenant', 'prefix', 'match_note', 'ip_count', 'mac', 'hostname', 'purpose',
+                  'period_days', 'expires_on', 'ip_address', 'ip_addresses', 'approver', 'notify_result', 'created')
+        default_columns = ('id', 'status', 'requester_name', 'requester_dept', 'building', 'room', 'prefix', 'ip_count',
+                           'purpose', 'ip_addresses', 'expires_on', 'notify_result', 'created')
 
 
 class DiscrepancyTable(NetBoxTable):

@@ -100,4 +100,43 @@ class DeviceListExtras(PluginTemplateExtension):
                 '<i class="mdi mdi-lan-connect"></i> 관리 IP로 장비 등록</a>')
 
 
-template_extensions = [DraggableColumns, IPListExtras, DeviceListExtras]
+LED_CSS = """<style>
+.ipam-led{display:inline-block;width:10px;height:10px;border-radius:50%;vertical-align:middle;background:#868e96}
+.ipam-led-ok{background:#2fb344;box-shadow:0 0 6px #2fb344}
+.ipam-led-running{background:#2fb344;box-shadow:0 0 6px #2fb344;animation:ipamBlink 1s ease-in-out infinite}
+.ipam-led-down{background:#d63939;box-shadow:0 0 6px #d63939}
+@keyframes ipamBlink{50%{opacity:.25}}
+</style>"""
+
+
+class SnmpLed(PluginTemplateExtension):
+    """우측 상단 SNMP 수집 상태 LED (정상·수집 중: 녹색 / 중단: 적색 / 꺼짐: 회색). 관리자에게만 표시, 30초마다 갱신"""
+
+    def navbar(self):
+        from django.urls import reverse
+        from urllib.parse import urlencode
+        from .jobs import SnmpCollectJob, collect_status
+        req = self.context.get('request')
+        u = getattr(req, 'user', None)
+        if not (u and u.is_authenticated and (u.is_superuser or u.has_perm('netbox_ip_request.change_iprequest'))):
+            return ''
+        try:
+            st = collect_status()
+        except Exception as e:          # 화면 전체가 깨지지 않도록
+            st = {'state': 'down', 'label': '상태 확인 실패', 'detail': str(e)[:100]}
+        from django.utils.html import escape
+        jobs = reverse('core:job_list') + '?' + urlencode({'name': SnmpCollectJob.Meta.name})
+        api = reverse('plugins:netbox_ip_request:snmp_status')
+        title = escape(f"SNMP 수집: {st['label']} — {st['detail']}")
+        return (LED_CSS +
+                f'<a href="{jobs}" class="nav-link px-2 ipam-snmp-led" title="{title}" aria-label="{title}">'
+                f'<span class="ipam-led ipam-led-{st["state"]}"></span>'
+                f'<span class="small text-secondary ms-1 d-none d-xl-inline">SNMP</span></a>'
+                '<script>(function(){if(window.__ipamLed)return;window.__ipamLed=1;'
+                f'setInterval(function(){{fetch("{api}",{{credentials:"same-origin"}}).then(r=>r.json()).then(function(s){{'
+                'document.querySelectorAll(".ipam-snmp-led").forEach(function(a){'
+                'a.title=a.ariaLabel="SNMP 수집: "+s.label+" — "+s.detail;'
+                'a.querySelector(".ipam-led").className="ipam-led ipam-led-"+s.state;});}).catch(function(){});},30000);})();</script>')
+
+
+template_extensions = [DraggableColumns, IPListExtras, DeviceListExtras, SnmpLed]

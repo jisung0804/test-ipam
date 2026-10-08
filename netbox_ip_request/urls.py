@@ -12,4 +12,5 @@ urlpatterns = [
     path('discrepancies/<int:pk>/', include(get_model_urls('netbox_ip_request', 'discrepancy'))),
     path('resources/', views.ResourcesView.as_view(), name='resources'),
     path('recon/', views.ReconSummaryView.as_view(), name='recon'),
+    path('snmp-status/', views.SnmpStatusView.as_view(), name='snmp_status'),
 ]

@@ -139,6 +139,18 @@ ok(Interface.objects.get(pk=c11['switch_port']).name == 'ge-0/0/10' and c11['dat
 ok(c11.get('excel_orig') == 'MAC 00:11:22:00:00:11 · 스위치 165.246.48.13 · 포트 ge-0/0/9', '엑셀 원본값은 처음 값 유지', c11)
 ok(cf('165.246.49.10')['data_source'] == 'l2_same', '처음부터 같던 행 = L2 확인', cf('165.246.49.10'))
 
+print('== 9. 판정 기간(덮어쓰기 끔)에도 빈 스위치·포트는 실제 값으로 채움')
+CFG['l2_overwrite'] = False
+o = IPAddress.objects.get(address__net_host='165.246.49.10')
+o.custom_field_data.update({'switch': None, 'switch_port': None, 'data_source': 'excel', 'l2_changed': None}); o.save()
+o = IPAddress.objects.get(address__net_host='165.246.49.11')
+port11 = o.custom_field_data['switch_port']
+cnt = recon.reconcile()
+c10 = cf('165.246.49.10')
+ok(c10.get('switch') == jx.pk and Interface.objects.get(pk=c10['switch_port']).name == 'ge-0/0/9'
+   and '(빈칸)' in (c10.get('l2_changed') or '') and cnt.get('filled', 0) >= 1, '빈 스위치·포트 → 관측 값으로 채움', (c10, cnt))
+ok(cf('165.246.49.11')['switch_port'] == port11, '값이 있는 행은 그대로(덮어쓰기 꺼짐)', cf('165.246.49.11'))
+
 CFG['auto_register_discovered'] = False
 CFG['l2_overwrite'] = True
 # 정리: 다른 검증 스크립트가 같은 시뮬레이터 IP 를 쓰므로 이 사이트 장비를 지운다

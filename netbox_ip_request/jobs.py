@@ -101,3 +101,48 @@ class InventorySyncJob(JobRunner):
 
 if _INV > 0:
     InventorySyncJob = system_job(interval=_INV)(InventorySyncJob)
+
+
+# --------------------------------------------------------------------- 수집 상태 (우측 상단 LED)
+def collect_status(now=None):
+    """SNMP 자동 수집 작업 상태 → {'state': ok|running|down|off, 'label', 'detail'}
+    ok      : 최근(주기 3배 안) 수집이 정상 완료
+    running : 지금 수집 중
+    down    : 마지막 수집이 오류/실패, 오래 수집이 없음, 예약이 처리되지 않음(작업자 멈춤), 작업이 너무 오래 안 끝남
+    off     : 자동 수집 꺼짐(IPAM_SNMP_INTERVAL=0)"""
+    import datetime as dt
+    from django.utils import timezone
+    from core.models import Job
+    now = now or timezone.now()
+    if _INTERVAL <= 0:
+        return {'state': 'off', 'label': '자동 수집 꺼짐', 'detail': 'IPAM_SNMP_INTERVAL=0'}
+    name = SnmpCollectJob.Meta.name
+    qs = Job.objects.filter(name=name)
+    loc = lambda t: timezone.localtime(t).strftime('%m-%d %H:%M') if t else '-'
+    run = qs.filter(status='running').order_by('-started').first()
+    if run and run.started:
+        mins = int((now - run.started).total_seconds() // 60)
+        if mins > max(60, 6 * _INTERVAL):
+            return {'state': 'down', 'label': '중단 의심',
+                    'detail': f'수집 작업이 {mins}분째 끝나지 않음 ({loc(run.started)} 시작) — netbox-worker 확인'}
+        return {'state': 'running', 'label': '수집 중', 'detail': f'{loc(run.started)} 시작 · {mins}분 경과'}
+    last = qs.filter(completed__isnull=False).order_by('-completed').first()
+    nxt = qs.filter(status__in=['scheduled', 'pending']).order_by('scheduled').first()
+    if nxt and (nxt.scheduled or nxt.created) < now - dt.timedelta(minutes=10):
+        return {'state': 'down', 'label': '중단',
+                'detail': f'예약된 수집({loc(nxt.scheduled or nxt.created)})이 실행되지 않음 — netbox-worker 가 멈춤'}
+    if last is None:
+        if nxt:
+            return {'state': 'running', 'label': '첫 수집 대기', 'detail': f'{loc(nxt.scheduled)} 예정'}
+        return {'state': 'down', 'label': '중단', 'detail': '수집 작업이 예약돼 있지 않음 — netbox-worker 를 다시 시작'}
+    if last.status in ('errored', 'failed'):
+        err = (last.error or '').replace('\n', ' ')[:120]
+        if 'Timeout' in err:
+            err += ' — 장비가 많으면 RQ_DEFAULT_TIMEOUT 을 늘릴 것'
+        return {'state': 'down', 'label': '중단', 'detail': f'{loc(last.completed)} 수집 오류: {err or last.status}'}
+    if now - last.completed > dt.timedelta(minutes=max(3 * _INTERVAL, 15)):
+        return {'state': 'down', 'label': '중단',
+                'detail': f'마지막 수집 {loc(last.completed)} — {int((now - last.completed).total_seconds() // 60)}분째 수집 없음'}
+    d = last.data or {}
+    tail = f" · 장비 성공 {d.get('ok', '?')} / 실패 {d.get('failed', '?')}" if isinstance(d, dict) else ''
+    return {'state': 'ok', 'label': '정상', 'detail': f'마지막 수집 {loc(last.completed)}{tail}'}

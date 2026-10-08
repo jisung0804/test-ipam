@@ -24,10 +24,13 @@ class IPRequestViewSet(NetBoxModelViewSet):
         if not self._need_change_perm(request):
             return Response({'detail': '승인 권한 없음'}, status=status.HTTP_403_FORBIDDEN)
         try:
-            ip = logic.approve(int(pk), request.user.username)
-        except logic.AllocationError as e:
+            d = request.data or {}
+            ip = logic.approve(int(pk), request.user.username, ip=d.get('ip') or None,
+                               count=d.get('count') or None, force=bool(d.get('force')))
+        except (logic.AllocationError, ValueError) as e:
             return Response({'detail': str(e)}, status=status.HTTP_409_CONFLICT)
-        return Response({'ip_address': str(ip), 'ip_id': ip.pk})
+        return Response({'ip_address': str(ip), 'ip_id': ip.pk,
+                         'ip_addresses': [str(o) for o in ip.issued], 'ip_ids': [o.pk for o in ip.issued]})
 
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):

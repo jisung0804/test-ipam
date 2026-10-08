@@ -15,12 +15,13 @@
         <tr><th>호실</th><td>{{ object.room|placeholder }} {% if object.room_name %}· {{ object.room_name }}{% endif %}</td></tr>
         <tr><th>발급 대역(VLAN)</th><td>{% if object.prefix %}{{ object.prefix|linkify }}{% if object.prefix.vlan %} · VLAN {{ object.prefix.vlan.vid }} {{ object.prefix.vlan.name }}{% endif %}{% else %}<span class="badge text-bg-warning">미정 — 관리자 선택</span>{% endif %}
           {% if object.match_note %}<div class="text-secondary small">자동 매칭: {{ object.match_note }}</div>{% endif %}</td></tr>
+        <tr><th>IP 개수</th><td><b>{{ object.ip_count }}</b>개</td></tr>
         <tr><th>MAC</th><td class="font-monospace">{{ object.mac|placeholder }}</td></tr>
         <tr><th>호스트명</th><td>{{ object.hostname|placeholder }}</td></tr>
         <tr><th>용도</th><td>{{ object.purpose }}</td></tr>
         <tr><th>사용 기한</th><td>{% if object.period_days %}{{ object.period_days }}일{% else %}기한 없음{% endif %}{% if object.expires_on %} (만료 {{ object.expires_on|date:"Y-m-d" }}){% endif %}
           <div class="text-secondary small">사용 기한은 180일로 고정되며, 변경은 관리자와 협의합니다.</div></td></tr>
-        <tr><th>발급 IP</th><td>{{ object.ip_address|linkify|placeholder }}</td></tr>
+        <tr><th>발급 IP{% if issued|length > 1 %} ({{ issued|length }}개){% endif %}</th><td>{% for o in issued %}{{ o|linkify }}{% if not forloop.last %}<br>{% endif %}{% empty %}{{ ''|placeholder }}{% endfor %}</td></tr>
         <tr><th>처리자</th><td>{{ object.approver|placeholder }}</td></tr>
         <tr><th>처리 메모</th><td>{{ object.reason|placeholder }}</td></tr>
         <tr><th>안내 메일</th><td>{{ object.notify_result|placeholder }}{% if object.notified_at %} <span class="text-secondary">({{ object.notified_at|date:"Y-m-d H:i" }})</span>{% endif %}</td></tr>
@@ -54,18 +55,29 @@
         {% if preview_prefix %}
         <div class="alert alert-info py-2 d-block">
           <div><b>{{ preview_prefix.prefix }}</b> 자동 발급 범위(마지막 자리 {{ alloc_min }}~{{ alloc_max }}) 빈 IP <b>{{ free_ips|length }}</b>개
-          · 다음 자동 발급: <b>{{ next_ip|default:"없음" }}</b><br>
+          · 신청 <b>{{ object.ip_count }}개</b> 자동 발급 예정: <b>{{ next_ips|join:", "|default:"없음" }}</b>
+          {% if not enough %}<span class="badge text-bg-danger">빈 IP 부족</span>{% endif %}<br>
           <span class="small">범위 밖 빈 IP {{ outside }}개(자동 발급 제외) · 최근 사용 중으로 보여 제외 {{ busy }}개</span></div>
         </div>
         <form method="post" action="{% url 'plugins:netbox_ip_request:iprequest_decide' pk=object.pk decision='approve' %}" class="mb-3">
           {% csrf_token %}
           <input type="hidden" name="prefix" value="{{ preview_prefix.pk }}">
-          <div class="mb-2">
-            <label class="me-3"><input type="radio" name="mode" value="auto" checked class="form-check-input"> 자동 발급 ({{ next_ip|default:"빈 IP 없음" }})</label>
-            <label><input type="radio" name="mode" value="manual" class="form-check-input"> 수동 지정</label>
+          <div class="input-group mb-2" style="max-width:16rem">
+            <span class="input-group-text">발급 개수</span>
+            <input type="number" name="count" id="ipr-count" value="{{ object.ip_count }}" min="1" max="{{ max_ip_count }}" class="form-control">
+            <span class="input-group-text">개</span>
           </div>
-          <input type="text" name="ip" list="free-ips" class="form-control mb-2" placeholder="수동 지정 IP (예: {{ next_ip|default:'165.246.49.21' }}) — 범위 밖 IP도 관리자는 지정 가능">
-          <datalist id="free-ips">{% for ip in free_ips %}<option value="{{ ip }}">{% endfor %}</datalist>
+          <div class="mb-2">
+            <label class="me-3"><input type="radio" name="mode" value="auto" checked class="form-check-input"> 자동 발급 (범위 안 앞에서부터 빈 IP)</label>
+            <label><input type="radio" name="mode" value="manual" id="ipr-manual" class="form-check-input"> 수동 지정</label>
+          </div>
+          <textarea name="ip" id="ipr-ips" rows="2" class="form-control mb-1 font-monospace" placeholder="수동 지정 IP — 발급 개수만큼, 쉼표·줄바꿈으로 구분 (예: {{ next_ips|join:', '|default:'165.246.49.21' }}). 범위 밖 IP도 관리자는 지정 가능"></textarea>
+          <div class="small text-secondary mb-2">빈 IP 를 누르면 수동 지정 칸에 추가됩니다:
+            {% for ip in free_ips|slice:":40" %}<a href="#" class="ipr-free badge text-bg-light text-decoration-none me-1">{{ ip }}</a>{% endfor %}{% if free_ips|length > 40 %} …{% endif %}</div>
+          <script>document.querySelectorAll('.ipr-free').forEach(a => a.addEventListener('click', e => {
+            e.preventDefault(); const t = document.getElementById('ipr-ips'); const v = t.value.trim();
+            if (!v.split(/[\s,;]+/).includes(a.textContent)) t.value = (v ? v + ', ' : '') + a.textContent;
+            document.getElementById('ipr-manual').checked = true; }));</script>
           <div class="row g-2 mb-2">
             <div class="col-6"><div class="input-group"><span class="input-group-text">사용 기한</span><input type="number" name="period_days" value="{{ object.period_days|default_if_none:'' }}" min="1" max="3650" class="form-control"><span class="input-group-text">일</span></div></div>
             <div class="col-6 pt-2"><label class="small"><input type="checkbox" name="force" class="form-check-input"> 최근 사용 중으로 보인 IP라도 발급</label></div>

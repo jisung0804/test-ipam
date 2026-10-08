@@ -5,7 +5,7 @@ class IPRequestConfig(PluginConfig):
     name = 'netbox_ip_request'
     verbose_name = 'IP 발급 신청'
     description = 'IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정'
-    version = '0.5.2'
+    version = '0.5.3'
     base_url = 'ip-request'
     min_version = '4.5.0'
     default_settings = {
@@ -15,6 +15,7 @@ class IPRequestConfig(PluginConfig):
         # ---- IP 신청·발급
         'alloc_host_min': 21,      # 자동 발급 범위: /24 대역 마지막 자리 21~252 (그 밖은 발급 제외)
         'alloc_host_max': 252,
+        'max_ip_count': 10,          # 신청 1건에 받을 수 있는 최대 IP 개수
         'default_period_days': 180,  # 신청 사용 기한(일) — 신청자는 변경 불가, 관리자만 수정
         'gateway_offset': 1,       # 게이트웨이 IP 를 못 찾을 때 대역 시작 + N
         'dns_servers': [],         # 안내 메일에 넣을 DNS 서버

@@ -112,14 +112,17 @@ def reconcile(days=30, now=None):
             state = 'discovered'
         new = {'recon_state': state, 'obs_mac': obs_mac or None, 'obs_location': loc[:250] or None}
         # ---- 실제 L2 를 기준으로 대장 덮어쓰기 (MAC·스위치·포트)
+        #      덮어쓰기를 끈 판정 기간(l2_overwrite=0)에도 '빈칸'은 실제 값으로 채운다 (엑셀 값은 그대로 둠)
         src = cf.get('data_source') or ('l2_new' if discovered else 'excel')
-        if (overwrite and obs_mac and state != 'conflict' and cf.get('review') != 'ignore'
+        if (obs_mac and state != 'conflict' and cf.get('review') != 'ignore'
                 and macs[obs_mac].last_seen >= fresh):
             chg, upd = [], {}
-            if cf.get('host_mac') != obs_mac:
+            if cf.get('host_mac') != obs_mac and (overwrite or not cf.get('host_mac')):
                 chg.append(f"MAC {cf.get('host_mac') or '(빈칸)'}→{obs_mac}")
                 upd['host_mac'] = obs_mac
             i = iface(e.device, e.port) if e else None
+            if i is not None and not overwrite and (cf.get('switch') or cf.get('switch_port')):
+                i = None                           # 판정 기간: 엑셀에 스위치·포트가 있으면 건드리지 않음
             if i is not None:
                 old_sw, old_port = cf.get('switch'), port_names.get(cf.get('switch_port'), '')
                 if old_sw != i.device_id:
@@ -135,10 +138,10 @@ def reconcile(days=30, now=None):
                                          f" · 포트 {port_names.get(cf.get('switch_port')) or '-'}")[:250]
                 upd['l2_changed'] = f"{today}: " + ' · '.join(chg)
                 src = 'l2_new' if discovered else 'l2_overwritten'
-                counts['overwritten'] = counts.get('overwritten', 0) + 1
+                counts['overwritten' if overwrite else 'filled'] = counts.get('overwritten' if overwrite else 'filled', 0) + 1
                 if state in ('mac_diff', 'port_diff'):
                     state = new['recon_state'] = 'ok'      # 덮어써서 이제 대장 = 실제
-            elif src == 'excel':
+            elif src == 'excel' and overwrite:
                 src = 'l2_same'
             new.update(upd)
         new['data_source'] = src

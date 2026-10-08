@@ -144,10 +144,21 @@ def allocate(prefix, **kw):
 
 
 # --------------------------------------------------------------------- 신청 워크플로
-def approve(request_pk, approver, now=None, prefix=None, ip=None, period_days=None, force=False):
-    """승인 = 발급. 한 트랜잭션: 발급 실패 시 승인도 롤백. 동시 승인은 1건만 성공.
-    관리자 옵션: prefix(신청 대역 변경 — VLAN 을 잘못 고른 경우), ip(수동 지정), period_days(기한 변경),
-                force(최근 ARP 에 보인 IP 라도 수동 발급)"""
+def parse_ips(text):
+    """수동 지정 IP 입력(쉼표·공백·줄바꿈 구분) → 목록 (순서 유지, 중복 제거)"""
+    out = []
+    for x in re.split(r'[\s,;]+', str(text or '')):
+        x = x.strip()
+        if x and x not in out:
+            out.append(x)
+    return out
+
+
+def approve(request_pk, approver, now=None, prefix=None, ip=None, period_days=None, force=False, count=None):
+    """승인 = 발급. 한 트랜잭션: 발급 실패 시 승인도 롤백(일부만 발급되는 일 없음). 동시 승인은 1건만 성공.
+    관리자 옵션: prefix(신청 대역 변경 — VLAN 을 잘못 고른 경우), ip(수동 지정 — 여러 개면 쉼표/줄바꿈으로 구분),
+                period_days(기한 변경), force(최근 ARP 에 보인 IP 라도 수동 발급), count(발급 개수 변경)
+    반환: 첫 번째 발급 IPAddress (발급한 전체는 .issued 목록 — 예전 호출과 호환)"""
     now = now or timezone.now()
     with advisory_lock(IP_LOCK):
         with transaction.atomic():
@@ -162,20 +173,41 @@ def approve(request_pk, approver, now=None, prefix=None, ip=None, period_days=No
                 raise AllocationError('발급할 대역(VLAN)이 정해지지 않았습니다 — 관리자가 대역을 선택하세요')
             if period_days is not None:
                 req.period_days = period_days
-            if ip:
-                obj = _manual_locked(req, str(ip).strip(), now, force)
+            mx = cfg('max_ip_count') or 10
+            n = int(count or req.ip_count or 1)
+            if not 1 <= n <= mx:
+                raise AllocationError(f'발급 개수는 1~{mx}개')
+            manual = parse_ips(ip) if ip else []
+            if manual and len(manual) != n:
+                raise AllocationError(f'수동 지정 IP 가 {len(manual)}개입니다 — 발급 개수({n}개)와 같게 입력하세요')
+            mac = req.mac if n == 1 else None          # 여러 개면 MAC 은 수집으로 채움
+            objs = []
+            if manual:
+                for a in manual:
+                    objs.append(_manual_locked(req, a, now, force, mac=mac))
             else:
-                obj = _allocate_locked(req.prefix, user_name=req.requester_name or req.requester, mac=req.mac,
-                                       hostname=req.hostname, purpose=req.purpose, period_days=req.period_days,
-                                       now=now, req=req)
-            req.status, req.approver, req.ip_address = RequestStatusChoices.ALLOCATED, approver, obj
+                for _ in range(n):
+                    try:
+                        objs.append(_allocate_locked(req.prefix, user_name=req.requester_name or req.requester, mac=mac,
+                                                     hostname=req.hostname, purpose=req.purpose,
+                                                     period_days=req.period_days, now=now, req=req))
+                    except AllocationError:
+                        raise AllocationError(f'{req.prefix}: 발급 범위({cfg("alloc_host_min")}~{cfg("alloc_host_max")}) 안의 '
+                                              f'빈 IP 가 {len(objs)}개뿐이라 {n}개를 발급할 수 없습니다 — 개수를 줄이거나 다른 대역·수동 지정')
+            if n != req.ip_count:
+                req.reason = ((req.reason + ' · ') if req.reason else '') + f'발급 개수 변경: {req.ip_count} → {n}'
+                req.reason = req.reason[:200]
+                req.ip_count = n
+            req.status, req.approver, req.ip_address = RequestStatusChoices.ALLOCATED, approver, objs[0]
             req.expires_on = (now + dt.timedelta(days=req.period_days)).date() if req.period_days else None
             req.save()
+            req.ip_addresses.set(objs)
             transaction.on_commit(lambda: notify(req.pk))   # 커밋된 뒤에만 메일 (롤백되면 안 보냄)
-            return obj
+            objs[0].issued = objs
+            return objs[0]
 
 
-def _manual_locked(req, ip, now, force):
+def _manual_locked(req, ip, now, force, mac=None):
     import ipaddress as _ipa
     try:
         a = _ipa.ip_address(ip.split('/')[0])
@@ -192,7 +224,7 @@ def _manual_locked(req, ip, now, force):
     if not force and str(a) in _recently_seen(req.prefix, now):
         raise AllocationError(f'{a} 는 최근 {cfg("arp_guard_days")}일 안에 네트워크에서 사용 중으로 관측됐습니다. '
                               f'그래도 발급하려면 \'사용 중이어도 발급\'을 체크하세요')
-    cf, extra = _ip_fields(req, mac=req.mac, hostname=req.hostname, purpose=req.purpose,
+    cf, extra = _ip_fields(req, mac=mac, hostname=req.hostname, purpose=req.purpose,
                            period_days=req.period_days, now=now)
     return _create_ip(req.prefix, str(a), cf, extra)
 
@@ -205,21 +237,30 @@ def gateway_of(prefix):
 
 
 def mail_text(req):
-    ip = req.ip_address
+    ips = [str(o.address.ip) for o in req.issued_ips()]
     net = IPNetwork(str(req.prefix.prefix))
     dns = ', '.join(cfg('dns_servers') or []) or '관리자에게 문의'
     exp = f"{req.expires_on:%Y-%m-%d} ({req.period_days}일)" if req.expires_on else '기한 없음'
-    lines = ['IP 발급 요청이 처리되었습니다. 해당 호실에서 아래 IP 주소를 사용하면 됩니다', '',
+    head = ('IP 발급 요청이 처리되었습니다. 해당 호실에서 아래 IP 주소를 사용하면 됩니다' if len(ips) <= 1 else
+            f'IP 발급 요청이 처리되었습니다. 해당 호실에서 아래 IP 주소 {len(ips)}개를 사용하면 됩니다')
+    lines = [head, '',
              f'호실번호 : {req.room or "-"}', f'호실명 : {req.room_name or "-"}',
              f'사용자 : {req.requester_name or req.requester}', f'연락처 : {req.requester_phone or "-"}',
-             f'사용기한 : {exp}', f'IP 주소 : {ip.address.ip if ip else "-"}',
-             f'subnetmask : {net.netmask}', f'gateway : {gateway_of(req.prefix)}', f'DNS : {dns}', '',
-             (f'※ 사용 기한은 {req.period_days}일입니다. 연장이나 변경이 필요하면 관리자와 협의하세요.' if req.period_days
-              else '※ 사용 기한 없음. 사용을 마치면 관리자에게 알려 주세요.')]
+             f'사용기한 : {exp}']
+    if len(ips) <= 1:
+        lines.append(f'IP 주소 : {ips[0] if ips else "-"}')
+    else:
+        lines.append(f'IP 주소 ({len(ips)}개) :')
+        lines += [f'  {k}. {a}' for k, a in enumerate(ips, 1)]
+    lines += [f'subnetmask : {net.netmask}', f'gateway : {gateway_of(req.prefix)}', f'DNS : {dns}', '',
+              (f'※ 사용 기한은 {req.period_days}일입니다. 연장이나 변경이 필요하면 관리자와 협의하세요.' if req.period_days
+               else '※ 사용 기한 없음. 사용을 마치면 관리자에게 알려 주세요.')]
     if cfg('admin_contact'):
         lines.append(f'※ 문의: {cfg("admin_contact")}')
     lines.append(f'(신청번호 {req})')
-    subject = f'[IP 발급] {ip.address.ip if ip else ""} 발급 완료 - {req.room or ""} {req.requester_name or ""}'.strip()
+    first = ips[0] if ips else ''
+    more = f' 외 {len(ips) - 1}개' if len(ips) > 1 else ''
+    subject = f'[IP 발급] {first}{more} 발급 완료 - {req.room or ""} {req.requester_name or ""}'.strip()
     return subject, '\n'.join(lines)
 
 

@@ -40,8 +40,11 @@ class IPRequestView(generic.ObjectView):
                         'alloc_min': logic.cfg('alloc_host_min'), 'alloc_max': logic.cfg('alloc_host_max')})
             if pfx is not None:
                 nxt, free, outside, busy = logic.available_preview(pfx)
-                ctx.update({'next_ip': nxt, 'free_ips': free, 'outside': outside, 'busy': busy})
-        if instance.status == 'allocated' and instance.ip_address:
+                ctx.update({'next_ip': nxt, 'free_ips': free, 'outside': outside, 'busy': busy,
+                            'next_ips': free[:instance.ip_count or 1], 'enough': len(free) >= (instance.ip_count or 1)})
+            ctx['max_ip_count'] = logic.cfg('max_ip_count') or 10
+        ctx['issued'] = instance.issued_ips()
+        if instance.status == 'allocated' and ctx['issued']:
             ctx['mail_subject'], ctx['mail_body'] = logic.mail_text(instance)
         return ctx
 
@@ -82,10 +85,11 @@ class IPRequestDecisionView(PermissionRequiredMixin, View):
                     messages.error(request, '수동 지정을 골랐다면 IP를 입력하세요')
                     return redirect(req.get_absolute_url())
                 ip = logic.approve(req.pk, request.user.username, prefix=d['prefix'],
-                                   ip=d['ip'] if d['mode'] == 'manual' else None,
+                                   ip=d['ip'] if d['mode'] == 'manual' else None, count=d.get('count'),
                                    period_days=d.get('period_days'), force=d.get('force', False))
                 req.refresh_from_db()
-                messages.success(request, f'{req} 발급 완료 — {ip}. 안내 메일: {req.notify_result or "발송 대기"}')
+                ips = ', '.join(str(o.address.ip) for o in ip.issued)
+                messages.success(request, f'{req} 발급 완료 — {len(ip.issued)}개: {ips}. 안내 메일: {req.notify_result or "발송 대기"}')
             elif decision == 'resend':
                 ok = logic.notify(req.pk)
                 req.refresh_from_db()
@@ -183,3 +187,12 @@ class ReconSummaryView(LoginRequiredMixin, View):
         reviews = [(code, label, color, rv.get(code, 0), f'{ip_list}?cf_review={code}') for code, label, color in REVIEW_CHOICES]
         return render(request, 'netbox_ip_request/recon.html', {
             'states': states, 'reviews': reviews, 'unreviewed': rv.get(None, 0), 'ip_list': ip_list})
+
+
+class SnmpStatusView(LoginRequiredMixin, View):
+    """우측 상단 LED 가 30초마다 읽는 SNMP 수집 상태(JSON)"""
+
+    def get(self, request):
+        from django.http import JsonResponse
+        from .jobs import collect_status
+        return JsonResponse(collect_status())

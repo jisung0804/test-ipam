@@ -36,7 +36,7 @@ class IPRequest(NetBoxModel):
     building = models.ForeignKey('dcim.Location', on_delete=models.SET_NULL, null=True, blank=True, related_name='+',
                                  verbose_name='건물')
     room = models.CharField(max_length=50, blank=True, verbose_name='호실번호',
-                            help_text='예: 101 (건물을 고른 경우) 또는 9-101. 모르면 비워 두세요')
+                            help_text='필수. 목록에서 고르거나 직접 입력 (예: 101 — 건물을 고른 경우, 또는 9-101)')
     room_name = models.CharField(max_length=100, blank=True, verbose_name='호실명', help_text='예: 교수연구실')
     tenant = models.ForeignKey('tenancy.Tenant', on_delete=models.PROTECT, null=True, blank=True,
                                related_name='+', verbose_name='부서')
@@ -45,6 +45,8 @@ class IPRequest(NetBoxModel):
     match_note = models.CharField(max_length=200, blank=True, verbose_name='대역 자동 매칭')
     mac = models.CharField(max_length=17, null=True, blank=True, verbose_name='MAC')
     hostname = models.CharField(max_length=100, blank=True, verbose_name='호스트명')
+    ip_count = models.PositiveSmallIntegerField(default=1, verbose_name='IP 개수',
+                                                help_text='필요한 IP 수. 2개 이상이면 MAC 은 비워 두세요(발급 후 자동 수집으로 채움)')
     purpose = models.CharField(max_length=200, verbose_name='용도')
     period_days = models.PositiveIntegerField(default=180, null=True, blank=True, verbose_name='사용 기한(일)',
                                               help_text='사용 기한은 180일로 고정됩니다. 변경이 필요하면 관리자와 협의하세요.')
@@ -53,6 +55,7 @@ class IPRequest(NetBoxModel):
     reason = models.CharField(max_length=200, blank=True, verbose_name='반려 사유')
     ip_address = models.ForeignKey('ipam.IPAddress', on_delete=models.SET_NULL, null=True, blank=True,
                                    related_name='+', verbose_name='발급 IP')
+    ip_addresses = models.ManyToManyField('ipam.IPAddress', blank=True, related_name='+', verbose_name='발급 IP 목록')
     expires_on = models.DateField(null=True, blank=True, verbose_name='사용 기한(만료일)')
     notified_at = models.DateTimeField(null=True, blank=True, verbose_name='안내 메일 발송')
     notify_result = models.CharField(max_length=300, blank=True, verbose_name='메일 발송 결과')
@@ -68,6 +71,13 @@ class IPRequest(NetBoxModel):
 
     def __str__(self):
         return f'REQ-{self.pk}'
+
+    def issued_ips(self):
+        """발급된 IP 전체 (예전 1개 발급 신청은 ip_address 만 있음)"""
+        ips = list(self.ip_addresses.all().order_by('address')) if self.pk else []
+        if not ips and self.ip_address_id:
+            ips = [self.ip_address]
+        return ips
 
     def get_absolute_url(self):
         return reverse('plugins:netbox_ip_request:iprequest', args=[self.pk])
@@ -93,6 +103,14 @@ class IPRequest(NetBoxModel):
             self.mac = norm_mac(self.mac)
         except ValueError as e:
             raise ValidationError({'mac': str(e)})
+        from netbox.plugins import get_plugin_config
+        mx = get_plugin_config('netbox_ip_request', 'max_ip_count') or 10
+        if not self.ip_count or self.ip_count < 1 or self.ip_count > mx:
+            raise ValidationError({'ip_count': f'IP 개수는 1~{mx}개'})
+        if self.ip_count > 1 and self.mac:
+            raise ValidationError({'mac': 'IP 를 2개 이상 신청할 때는 MAC 을 비워 두세요 (발급 후 자동 수집으로 채워짐)'})
+        if self._state.adding and not (self.room or '').strip():
+            raise ValidationError({'room': '호실번호는 필수입니다 — 목록에서 고르거나 직접 입력하세요'})
         if self._state.adding and self.mac and mac_in_use(self.mac):
             raise ValidationError({'mac': f'이 MAC은 이미 IP를 발급받았습니다: {mac_in_use(self.mac)}'})
         if self.mac and self.status in ('submitted', 'approved'):

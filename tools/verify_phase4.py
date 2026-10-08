@@ -260,5 +260,80 @@ q = IPRequest.objects.filter(requester_email='ui@p4.test').first()
 ok(resp.status_code == 302 and q and q.building == b77 and q.room == '77-103' and q.prefix == C,
    '화면 신청(위치 보기 권한 없는 사용자): 77호관 103 → 77-103 · C 대역 자동 매칭', (resp.status_code, q and (q.room, q.prefix)))
 
+print('== 추가 요청: 호실 필수·호실 목록 · IP 개수 · 여러 개 자동/수동 발급')
+ok('ipr-room-list' in h and '"77-101"' in h and '"78-102"' in h, '신청 화면: 호실 콤보박스에 전체 호실 목록(건물별)', h.count('ipr-room-list'))
+ok('id="id_ip_count"' in h and '10개' in h, '신청 화면: IP 개수 선택(1~10개)')
+tok_ = _re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', h).group(1)
+resp = w.post('http://127.0.0.1:8001/plugins/ip-request/requests/add/', allow_redirects=False,
+              headers={'Referer': 'http://127.0.0.1:8001/plugins/ip-request/requests/add/'},
+              data={'csrfmiddlewaretoken': tok_, **WHO, 'requester_email': 'noroom@p4.test', 'building': str(b77.pk),
+                    'room': '', 'purpose': '호실 없음', 'ip_count': '1'})
+ok(resp.status_code == 200 and '호실번호는 필수' in resp.text and not IPRequest.objects.filter(requester_email='noroom@p4.test').exists(),
+   '화면: 호실번호 비우면 신청 안 됨', resp.status_code)
+W2 = {k: v for k, v in WHO.items() if k != 'room'}
+r = admin.post(f'{API}/requests/', json={**W2, 'requester_email': 'noroom2@p4.test', 'purpose': 'x'})
+ok(r.status_code == 400 and 'room' in r.text, 'API: 호실번호 없으면 400', r.text[:200])
+resp = w.post('http://127.0.0.1:8001/plugins/ip-request/requests/add/', allow_redirects=False,
+              headers={'Referer': 'http://127.0.0.1:8001/plugins/ip-request/requests/add/'},
+              data={'csrfmiddlewaretoken': tok_, **WHO, 'requester_email': 'multi@p4.test', 'building': str(b77.pk),
+                    'room': '77-103', 'purpose': 'PC 3대', 'ip_count': '3'})
+q = IPRequest.objects.filter(requester_email='multi@p4.test').first()
+ok(resp.status_code == 302 and q and q.ip_count == 3 and q.prefix == C, '화면: IP 3개 신청 (호실은 목록 값 77-103 그대로)', (resp.status_code, q and q.ip_count))
+for f in glob.glob('/tmp/mail/*.eml'):
+    os.remove(f)
+ip = logic.approve(q.pk, 'admin')
+q.refresh_from_db()
+got = sorted(str(o.address.ip) for o in q.ip_addresses.all())
+ok(len(ip.issued) == 3 and len(got) == 3 and all(21 <= int(a.split('.')[-1]) <= 252 for a in got) and q.ip_address == ip,
+   '자동 발급: 신청 개수(3)만큼 발급 범위 안에서', got)
+time.sleep(1)
+mm = [m for m in mails() if m[0] == 'multi@p4.test']
+ok(mm and '외 2개' in mm[0][1] and all(a in mm[0][2] for a in got) and 'IP 주소 (3개)' in mm[0][2], '안내 메일: 3개 모두 표시', mm and mm[0][1])
+from django.core.exceptions import ValidationError as _VE
+bad = IPRequest(requester='p4user', **{**W2, 'requester_email': 'mac2@p4.test'}, building=b77, room='77-101', purpose='x',
+                ip_count=2, mac='00:11:22:33:44:55')
+try:
+    bad.full_clean(); ok(False, 'IP 2개 이상 + MAC → 거부')
+except _VE as e:
+    ok('mac' in e.message_dict, 'IP 2개 이상 + MAC → 거부(MAC 은 수집으로 채움)', e.message_dict)
+def mk(n, email_):
+    o = IPRequest(requester='p4user', **{**W2, 'requester_email': email_}, building=b77, room='77-102', purpose='x', ip_count=n)
+    o.full_clean(); o.save(); return o
+q2 = mk(2, 'man@p4.test')
+try:
+    logic.approve(q2.pk, 'admin', ip='10.61.1.200'); ok(False, '수동 지정 개수 불일치 거부')
+except logic.AllocationError as e:
+    ok('2개' in str(e) and IPRequest.objects.get(pk=q2.pk).status == 'submitted', '수동 지정: IP 개수가 신청 개수와 다르면 거부', e)
+ip = logic.approve(q2.pk, 'admin', ip='10.61.1.200, 10.61.1.201')
+ok(sorted(str(o.address.ip) for o in ip.issued) == ['10.61.1.200', '10.61.1.201'], '수동 지정: 쉼표로 2개', [str(o) for o in ip.issued])
+q3 = mk(3, 'cnt@p4.test')
+ip = logic.approve(q3.pk, 'admin', count=1)
+q3.refresh_from_db()
+ok(len(ip.issued) == 1 and q3.ip_count == 1 and '발급 개수 변경: 3 → 1' in q3.reason, '관리자가 발급 개수 변경(3→1)', q3.reason)
+small = Prefix.objects.create(prefix='10.61.9.0/29', status='active', description='P4 small')
+q4 = mk(8, 'many@p4.test')
+before = IPAddress.objects.filter(address__net_host_contained='10.61.9.0/29').count()
+try:
+    logic.approve(q4.pk, 'admin', prefix=small); ok(False, '빈 IP 부족 거부')
+except logic.AllocationError as e:
+    ok('8개' in str(e) and IPAddress.objects.filter(address__net_host_contained='10.61.9.0/29').count() == before
+       and IPRequest.objects.get(pk=q4.pk).status == 'submitted', '빈 IP 가 모자라면 하나도 발급하지 않음(전체 취소)', e)
+small.delete()
+a = requests.Session()
+t = a.get('http://127.0.0.1:8001/login/').text
+a.post('http://127.0.0.1:8001/login/', data={'username': 'admin', 'password': 'admin',
+       'csrfmiddlewaretoken': _re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', t).group(1)},
+       headers={'Referer': 'http://127.0.0.1:8001/login/'})
+q5 = mk(4, 'page@p4.test')
+pg = a.get(f'http://127.0.0.1:8001/plugins/ip-request/requests/{q5.pk}/').text
+ok('name="count"' in pg and 'value="4"' in pg and '신청 <b>4개</b> 자동 발급 예정' in pg and 'ipr-free' in pg,
+   '관리자 발급 화면: 발급 개수(4)·자동 발급 예정 IP 4개·빈 IP 눌러 수동 지정', pg.count('ipr-free'))
+tk = _re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', pg).group(1)
+rr = a.post(f'http://127.0.0.1:8001/plugins/ip-request/requests/{q5.pk}/approve/', allow_redirects=True,
+            headers={'Referer': f'http://127.0.0.1:8001/plugins/ip-request/requests/{q5.pk}/'},
+            data={'csrfmiddlewaretoken': tk, 'prefix': str(C.pk), 'mode': 'auto', 'count': '2', 'period_days': '180'})
+q5.refresh_from_db()
+ok(q5.status == 'allocated' and q5.ip_addresses.count() == 2 and '발급 완료 — 2개' in rr.text, '화면에서 개수 2로 바꿔 자동 발급', q5.ip_addresses.count())
+
 wipe()
 print(f"\n결과: PASS {R['p']} / FAIL {R['f']}")
