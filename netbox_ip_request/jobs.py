@@ -58,6 +58,27 @@ if _INTERVAL > 0:
     SnmpCollectJob = system_job(interval=_INTERVAL)(SnmpCollectJob)
 
 
+class ReconJob(JobRunner):
+    """대장 ↔ 수집 이력(ARP·MAC) 대사만 다시 계산 (SNMP 접속 없음, 수 초).
+    장비가 많아 수집 작업이 시간 초과로 끝나도 '장비 대사 결과·판정' 화면이 비지 않도록 따로 돈다."""
+
+    class Meta:
+        name = 'IP 대장 대사 계산'
+
+    def run(self, *args, **kwargs):
+        from core.models import Job
+        from netbox.plugins import get_plugin_config
+        if Job.objects.filter(name=SnmpCollectJob.Meta.name, status='running').exists():
+            self.job.data = {'skipped': '수집 작업 실행 중 — 그 작업이 끝나며 대사를 계산함'}
+            return
+        from .recon import reconcile
+        self.job.data = {'recon': reconcile(days=get_plugin_config('netbox_ip_request', 'recon_days') or 30)}
+
+
+if _INTERVAL > 0:
+    ReconJob = system_job(interval=_INTERVAL)(ReconJob)
+
+
 _INV = int(settings.PLUGINS_CONFIG.get('netbox_ip_request', {}).get('inventory_interval', 1440) or 0)
 
 

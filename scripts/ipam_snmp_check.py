@@ -87,6 +87,12 @@ class SnmpCheck(Script):
         if tot.get('ports'):
             p = tot['ports']
             msg += f" · 포트 일치 {p['matched']} / 채움 {p['filled']} / 불일치 {p['mismatch']}"
+        # 대사 결과·관리자 판정 화면(recon_state)은 reconcile 이 채운다 — 수집 직후 바로 계산
+        from netbox.plugins import get_plugin_config
+        from netbox_ip_request.recon import reconcile
+        rc = reconcile(days=get_plugin_config('netbox_ip_request', 'recon_days') or 30)
+        if isinstance(rc, dict):
+            self.log_info('대사 결과 갱신 — ' + ' · '.join(f'{k} {v}' for k, v in rc.items()))
         if commit:
             self.log_success('반영 완료 — ' + msg)
         else:
