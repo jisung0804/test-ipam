@@ -5,7 +5,7 @@ class IPRequestConfig(PluginConfig):
     name = 'netbox_ip_request'
     verbose_name = 'IP 발급 신청'
     description = 'IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정'
-    version = '0.5.4'
+    version = '0.5.5'
     base_url = 'ip-request'
     min_version = '4.5.0'
     default_settings = {
@@ -29,6 +29,7 @@ class IPRequestConfig(PluginConfig):
         'snmp_retries': 1,
         'snmp_concurrency': 20,    # 동시에 수집할 장비 수
         'snmp_device_timeout': 120,  # 장비 1대 최대 수집 시간(초)
+        'snmp_job_seconds': 240,     # 자동 수집 1회 최대 시간(초). RQ_DEFAULT_TIMEOUT-60 을 넘지 않음 — 다 못 읽은 장비는 다음 회차에 먼저
         'snmp_mac_roles': ['access-switch'],  # 이 역할의 장치는 태그 없이도 MAC 수집
         'auto_register_discovered': False,  # 수집할 때마다 대장에 없는 IP를 '자동 발견'으로 등록
         'discovered_prefix_len': 24,       # 자동 발견 IP가 들어갈 대역이 없을 때 만들 프리픽스 길이
@@ -58,7 +59,7 @@ class IPRequestConfig(PluginConfig):
         if any(a.endswith('rqworker') for a in sys.argv[:3]):
             try:
                 from .jobs import clear_stale_jobs
-                n = clear_stale_jobs()
+                n = clear_stale_jobs(on_start=True)
                 if n:
                     import logging
                     logging.getLogger('netbox_ip_request').warning('끊긴 자동 작업 %s건 정리 → 다시 예약됨', n)

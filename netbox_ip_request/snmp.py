@@ -350,26 +350,52 @@ async def poll_device(engine, dev, creds, what=('arp', 'mac')):
     return res
 
 
-async def _poll_all(devices, creds, what):
+async def _poll_all(devices, creds, what, device_timeout=None, deadline=None):
+    """장비들을 동시에(snmp_concurrency) 수집. device_timeout: 장비 1대 최대 초, deadline: 이번 묶음 전체 최대 초
+    (전체 시간을 넘기면 끝나지 않은 장비는 '시간 초과'로 돌려주고 바로 끝낸다 — 작업이 멈춰 있지 않게)"""
     from pysnmp.hlapi.v3arch import asyncio as h
+    dto = device_timeout or cfg('snmp_device_timeout')
     engine = h.SnmpEngine()
     sem = asyncio.Semaphore(cfg('snmp_concurrency'))
+
+    def _timeout(d, secs, why):
+        return {'name': d['name'], 'host': d['host'], 'arp': [], 'mac': [], 'method': '',
+                'error': f'{why}({int(secs)}초)', 'secs': secs}
 
     async def one(d):
         async with sem:
             try:
-                return await asyncio.wait_for(poll_device(engine, d, creds, what), cfg('snmp_device_timeout'))
+                return await asyncio.wait_for(poll_device(engine, d, creds, what), dto)
             except asyncio.TimeoutError:
-                return {'name': d['name'], 'host': d['host'], 'arp': [], 'mac': [], 'method': '',
-                        'error': f"장비 1대 수집 시간 초과({cfg('snmp_device_timeout')}초)", 'secs': cfg('snmp_device_timeout')}
+                return _timeout(d, dto, '장비 1대 수집 시간 초과')
+    tasks = [asyncio.ensure_future(one(d)) for d in devices]
     try:
-        return await asyncio.gather(*[one(d) for d in devices])
+        if deadline:
+            await asyncio.wait(tasks, timeout=deadline)
+        else:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        out = []
+        for d, t in zip(devices, tasks):
+            if t.done() and not t.cancelled() and t.exception() is None:
+                out.append(t.result())
+            else:
+                if not t.done():
+                    t.cancel()
+                out.append(_timeout(d, deadline or dto, '수집 시간 한도로 중단'))
+        return out
     finally:
+        for t in tasks:
+            if not t.done():
+                t.cancel()
+        try:
+            await asyncio.wait_for(asyncio.gather(*tasks, return_exceptions=True), 5)
+        except Exception:
+            pass
         engine.close_dispatcher()
 
 
-def poll(devices, what=('arp', 'mac'), creds=None):
-    return asyncio.run(_poll_all(devices, credentials() if creds is None else creds, what))
+def poll(devices, what=('arp', 'mac'), creds=None, device_timeout=None, deadline=None):
+    return asyncio.run(_poll_all(devices, credentials() if creds is None else creds, what, device_timeout, deadline))
 
 
 def targets(device_ids=None):
@@ -398,8 +424,8 @@ def targets(device_ids=None):
     return out, skipped
 
 
-def ingest(results, now=None):
-    """수집 결과를 대장에 반영(동기, ORM). 반환: 합계 요약."""
+def ingest(results, now=None, ports=True):
+    """수집 결과를 대장에 반영(동기, ORM). 반환: 합계 요약. ports=False 면 포트 대조(check_ports)는 호출자가 마지막에 한 번"""
     from . import logic
     now = now or timezone.now()
     tot = {'devices': len(results), 'ok': 0, 'failed': 0, 'arp': 0, 'mac': 0, 'unregistered_use': 0,
@@ -417,7 +443,7 @@ def ingest(results, now=None):
         if r['mac']:
             logic.ingest_mac(r['name'], r['mac'], now=now)
             tot['mac'] += len(r['mac'])
-    tot['ports'] = logic.check_ports() if tot['mac'] else {}
+    tot['ports'] = logic.check_ports() if (ports and tot['mac']) else {}
     return tot
 
 
