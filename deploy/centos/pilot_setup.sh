@@ -68,6 +68,8 @@ else
   cp "$HERE/nginx-netbox-pilot.conf" /etc/nginx/conf.d/netbox.conf
 fi
 command -v restorecon >/dev/null && restorecon -R /etc/nginx >/dev/null 2>&1 || true
+# nginx 기본 웹 서버(80 포트)는 쓰지 않으므로 닫는다 (외부 스캐닝·웹쉘 탐지 대상이 됨)
+bash "$HERE/nginx_close_80.sh" | sed 's/^/      /' || true
 nginx -t
 systemctl enable nginx >/dev/null
 systemctl restart nginx
