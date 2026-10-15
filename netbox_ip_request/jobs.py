@@ -16,7 +16,30 @@ class DormantIPJob(JobRunner):
         from .logic import classify_dormant, release_quarantine
         dormant = classify_dormant()
         released = release_quarantine()
-        self.job.data = {'dormant': dormant, 'released': released}
+        self.job.data = {'dormant': dormant, 'released': released, 'pruned': prune_observations()}
+
+
+def prune_observations(now=None):
+    """오래된 ARP·MAC 관측 삭제 — 보관 기간(obs_retention_days, 기본 90일. 대사 기간 recon_days 보다 짧게 잡지 않음)
+    관측 표가 끝없이 커지면 수집 후처리가 점점 느려지므로 매일 정리한다. 반환 {'arp': 삭제 수, 'mac': 삭제 수}"""
+    import datetime as dt
+    from django.db import connection
+    from django.utils import timezone
+    from netbox.plugins import get_plugin_config
+    cfg = lambda k: get_plugin_config('netbox_ip_request', k)
+    days = max(int(cfg('obs_retention_days') or 90), int(cfg('recon_days') or 30), 2)
+    cut = (now or timezone.now()) - dt.timedelta(days=days)
+    out = {}
+    with connection.cursor() as c:
+        for key, table in (('arp', 'netbox_ip_request_arpentry'), ('mac', 'netbox_ip_request_macentry')):
+            n = 0
+            while True:                                       # 한 번에 5만 행씩 (잠금을 짧게)
+                c.execute(f"DELETE FROM {table} WHERE id IN (SELECT id FROM {table} WHERE last_seen < %s LIMIT 50000)", [cut])
+                n += c.rowcount
+                if c.rowcount < 50000:
+                    break
+            out[key] = n
+    return out
 
 
 # 주기는 설정(snmp_interval, 분)을 따른다. 0 이면 자동 수집을 등록하지 않음.
@@ -60,39 +83,51 @@ class SnmpCollectJob(JobRunner):
         tot = {'devices': len(devices), 'ok': 0, 'failed': 0, 'arp': 0, 'mac': 0, 'unregistered_use': 0,
                'mac_mismatch': 0, 'ip_conflict': 0, 'revived': 0, 'mac_filled': 0}
         done, errors = 0, []
+        ph = {'poll': 0.0, 'ingest': 0.0}                           # 단계별 소요 시간(초) — 느린 단계 찾기용
         reserve = max(15, budget // 5)                             # 포트 대조·대사 몫
         for i in range(0, len(devices), chunk):
             left = budget - reserve - (time.monotonic() - t0)
             if left < 20:
                 break
             part = devices[i:i + chunk]
+            t = time.monotonic()
             results = snmp.poll(part, device_timeout=min(cfg('snmp_device_timeout') or 120, left),
                                 deadline=left)
-            t = snmp.ingest(results, ports=False)
-            for k, v in t.items():
+            ph['poll'] += time.monotonic() - t
+            t = time.monotonic()
+            r = snmp.ingest(results, ports=False)
+            ph['ingest'] += time.monotonic() - t
+            for k, v in r.items():
                 if isinstance(v, int) and k != 'devices':
                     tot[k] = tot.get(k, 0) + v
             _mark_polled([d['name'] for d in part])
-            errors += [f"{r['name']}({r['host']}): {r['error']}" for r in results if r['error']]
+            errors += [f"{x['name']}({x['host']}): {x['error']}" for x in results if x['error']]
             done += len(part)
         from .logic import check_ports
         tot['polled'] = done
         tot['deferred'] = len(devices) - done                       # 이번에 못 읽고 다음으로 미룬 장비
+        t = time.monotonic()
         tot['ports'] = check_ports() if tot['mac'] else {}
+        ph['ports'] = time.monotonic() - t
         if cfg('auto_register_discovered'):
             from .logic import register_discovered
+            t = time.monotonic()
             tot['discovered'] = register_discovered()
             if tot['discovered']['created']:
                 tot['ports'] = check_ports()
+            ph['discover'] = time.monotonic() - t
         from .recon import reconcile
+        t = time.monotonic()
         tot['recon'] = reconcile(days=cfg('recon_days') or 30)
+        ph['recon'] = time.monotonic() - t
+        tot['phases'] = {k: round(v, 1) for k, v in ph.items()}
         tot['secs'] = round(time.monotonic() - t0, 1)
         tot['budget'] = budget
         tot['skipped'] = [f'{n}: {why}' for n, why in skipped]
         tot['errors'] = errors[:200]
         self.job.data = tot
-        logger.info('SNMP 수집: 장비 %s 중 %s (성공 %s, 실패 %s, 다음으로 미룸 %s) %ss',
-                    tot['devices'], done, tot['ok'], tot['failed'], tot['deferred'], tot['secs'])
+        logger.info('SNMP 수집: 장비 %s 중 %s (성공 %s, 실패 %s, 다음으로 미룸 %s) %ss 단계 %s',
+                    tot['devices'], done, tot['ok'], tot['failed'], tot['deferred'], tot['secs'], tot['phases'])
 
 
 def _db_guard():
@@ -273,20 +308,52 @@ def clear_stale_jobs(now=None, on_start=False, overdue_minutes=30):
     return n
 
 
+def _rq_timeout():
+    return int(getattr(settings, 'RQ_DEFAULT_TIMEOUT', 300) or 300)
+
+
+def _secs(j):
+    return round((j.completed - j.started).total_seconds()) if j.started and j.completed else None
+
+
 def watchdog_check(now=None):
-    """서버 cron(ipam_watchdog.sh, 5분마다)이 부르는 점검. 반환 {'action': ok|requeued|restart, 'reason': ...}
+    """서버 cron(ipam_watchdog.sh, 5분마다)이 부르는 점검. 반환 {'action': ok|requeued|restart, 'reason': ..., 'warn': [...]}
     - 실행 중인 작업이 한도를 넘김 → restart (작업자 프로세스 안에서 멈춘 작업은 작업자 재시작으로만 끝남)
-    - 예약이 10분 넘게 실행 안 됨·예약 자체가 없음 → 정리 후 다시 예약(requeued)"""
+    - 수집이 3회 연속 오류(시간 초과 등) → restart (작업자를 새로 띄워 연결·메모리 상태 초기화). 같은 오류로 반복하지 않음
+    - 예약이 10분 넘게 실행 안 됨·예약 자체가 없음 → 정리 후 다시 예약(requeued)
+    warn: 조치는 하지 않고 로그에 남길 경고 (수집 시간이 RQ 한도의 80% 를 넘음 등)"""
     import datetime as dt
+    from django.core.cache import cache
     from django.utils import timezone
     from core.models import Job
     now = now or timezone.now()
+    warn = []
+    if _INTERVAL > 0:
+        recent = list(Job.objects.filter(name=SnmpCollectJob.Meta.name, completed__isnull=False).order_by('-completed')[:3])
+        done = [j for j in recent if j.status == 'completed']
+        if done and _secs(done[0]) and _secs(done[0]) > 0.8 * _rq_timeout():
+            ph = (done[0].data or {}).get('phases') if isinstance(done[0].data, dict) else None
+            warn.append(f'수집 #{done[0].pk} 이 {_secs(done[0])}초 걸림 — RQ 한도 {_rq_timeout()}초의 80% 초과 (단계별 {ph or "-"})')
     for cls, kw in _plugin_system_jobs().items():
         lim = _running_limit_minutes(cls, kw.get('interval') or 5)
         j = Job.objects.filter(name=cls.name, status='running').order_by('started').first()
         if j and (j.started or j.created) < now - dt.timedelta(minutes=lim):
             mins = int((now - (j.started or j.created)).total_seconds() // 60)
-            return {'action': 'restart', 'reason': f'{cls.name} #{j.pk} 가 {mins}분째 실행 중(한도 {lim}분)'}
+            return {'action': 'restart', 'reason': f'{cls.name} #{j.pk} 가 {mins}분째 실행 중(한도 {lim}분)', 'warn': warn}
+    if _INTERVAL > 0 and len(recent) == 3 and all(j.status in ('errored', 'failed') for j in recent):
+        try:
+            seen = cache.get('ipam_wd_err_restart') or 0
+        except Exception:
+            seen = 0
+        if recent[0].pk != seen:
+            try:
+                cache.set('ipam_wd_err_restart', recent[0].pk, None)
+            except Exception:
+                pass
+            err = (recent[0].error or recent[0].status).replace('\n', ' ')[:150]
+            return {'action': 'restart', 'warn': warn,
+                    'reason': f'수집 3회 연속 오류(#{recent[2].pk}~#{recent[0].pk}) — 마지막 오류: {err}'}
+        warn.append('수집 3회 연속 오류 — 작업자 재시작 후에도 계속됨: ipam-watchdog status 로 원인 확인')
     n = clear_stale_jobs(now=now, overdue_minutes=10)
     made = []
     for cls, kw in _plugin_system_jobs().items():
@@ -294,5 +361,66 @@ def watchdog_check(now=None):
             cls.enqueue_once(**kw)
             made.append(cls.name)
     if n or made:
-        return {'action': 'requeued', 'reason': f'끊긴 작업 {n}건 정리, 다시 예약: {", ".join(made) or "-"}'}
-    return {'action': 'ok', 'reason': '정상'}
+        return {'action': 'requeued', 'reason': f'끊긴 작업 {n}건 정리, 다시 예약: {", ".join(made) or "-"}', 'warn': warn}
+    return {'action': 'ok', 'reason': '정상', 'warn': warn}
+
+
+def health_report(now=None, n=8):
+    """자체 진단 보고(ipam-watchdog status) — 문자열 줄 목록. 설정·LED 상태·최근 수집 이력(단계별 시간)·관측 표 크기·판정"""
+    from django.utils import timezone
+    from core.models import Job
+    from ipam.models import IPAddress
+    from .models import ArpEntry, MacEntry
+    now = now or timezone.now()
+    loc = lambda t: timezone.localtime(t).strftime('%m-%d %H:%M:%S') if t else '-'
+    from netbox.plugins import get_plugin_config
+    cfg = lambda k: get_plugin_config('netbox_ip_request', k)
+    import netbox_ip_request as P
+    L, bad = [], []
+    L.append(f'플러그인 {P.config.version} · 수집 주기 {_INTERVAL}분 · 수집 1회 한도 {job_budget()}초 '
+             f'(RQ 한도 {_rq_timeout()}초) · 동시 수집 {cfg("snmp_concurrency")}대')
+    st = collect_status(now)
+    L.append(f"LED: {st['state']} — {st['label']} · {st['detail']}")
+    if st['state'] == 'down':
+        bad.append('LED 빨강: ' + st['detail'])
+    L.append('')
+    L.append('최근 수집 (최신순)')
+    L.append(f"  {'번호':>6} {'상태':<10} {'시작':<15} {'걸린 초':>7} {'장비 읽음/미룸/실패':<16} 단계별 초(poll·ingest·ports·recon) / 오류")
+    jobs = list(Job.objects.filter(name=SnmpCollectJob.Meta.name).order_by('-created')[:n])
+    for j in jobs:
+        d = j.data if isinstance(j.data, dict) else {}
+        secs = _secs(j) if j.completed else (int((now - j.started).total_seconds()) if j.started else None)
+        dv = f"{d.get('polled', '-')}/{d.get('deferred', '-')}/{d.get('failed', '-')}" if d else '-'
+        tail = (j.error or '').replace('\n', ' ')[:90] if j.status in ('errored', 'failed') else (
+            ' '.join(f'{k}={v}' for k, v in (d.get('phases') or {}).items())
+            or (d.get('skipped') if isinstance(d.get('skipped'), str) else ''))
+        L.append(f"  {j.pk:>6} {j.status:<10} {loc(j.started):<15} {secs if secs is not None else '-':>7} {dv:<16} {tail}")
+    fin = [j for j in jobs if j.completed][:5]
+    errs = [j for j in fin if j.status in ('errored', 'failed')]
+    if len(errs) >= 2:
+        msg = ' / '.join(sorted({(j.error or j.status).replace('\n', ' ')[:80] for j in errs}))
+        bad.append(f'최근 수집 {len(fin)}회 중 {len(errs)}회 오류: {msg}')
+        if any('timeout' in (j.error or '').lower() or 'maximum timeout' in (j.error or '') for j in errs):
+            bad.append('  → RQ 시간 한도 초과. 0.6.3 으로 올리면 후처리(포트 대조·ARP 적재)가 수십 배 빨라짐 — 위 단계별 초 확인')
+    ok_secs = [_secs(j) for j in fin if j.status == 'completed' and _secs(j)]
+    if ok_secs and max(ok_secs) > 0.8 * _rq_timeout():
+        bad.append(f'정상 완료도 {max(ok_secs)}초 — RQ 한도 {_rq_timeout()}초에 가까움(곧 시간 초과)')
+    L.append('')
+    L.append('자동 작업 예약')
+    for cls, kw in _plugin_system_jobs().items():
+        live = list(Job.objects.filter(name=cls.name, status__in=['pending', 'scheduled', 'running']).order_by('created'))
+        L.append(f"  {cls.name} (주기 {kw.get('interval')}분): " +
+                 (', '.join(f'#{x.pk} {x.status} {loc(x.scheduled or x.started)}' for x in live) or '예약 없음 ※'))
+        if not live:
+            bad.append(f'{cls.name}: 다음 실행 예약 없음 (워치독이 5분 안에 다시 예약)')
+    L.append('')
+    arp, mac = ArpEntry.objects.count(), MacEntry.objects.count()
+    ipm = IPAddress.objects.filter(status='active').exclude(custom_field_data__host_mac=None).count()
+    L.append(f'관측 표: ARP {arp:,}행 · MAC {mac:,}행 · MAC 등록된 사용 중 IP {ipm:,}개 '
+             f'(보관 {max(int(cfg("obs_retention_days") or 90), int(cfg("recon_days") or 30))}일, 매일 정리)')
+    L.append('')
+    L.append('판정: ' + ('정상' if not bad else '확인 필요'))
+    L += ['  - ' + b for b in bad]
+    return L
+
+

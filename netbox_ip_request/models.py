@@ -154,7 +154,9 @@ class ArpEntry(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['ip', 'mac', 'device'], name='netbox_ip_request_arp_uniq')]
-        indexes = [models.Index(fields=['ip', 'last_seen'])]
+        indexes = [models.Index(fields=['ip', 'last_seen']),
+                   models.Index(fields=['device', 'ip'], name='ipreq_arp_dev_ip'),
+                   models.Index(fields=['last_seen'], name='ipreq_arp_seen')]
 
 
 class MacEntry(models.Model):
@@ -168,3 +170,5 @@ class MacEntry(models.Model):
 
     class Meta:
         constraints = [models.UniqueConstraint(fields=['mac', 'device', 'port'], name='netbox_ip_request_mac_uniq')]
+        indexes = [models.Index(fields=['device', 'port', 'last_seen'], name='ipreq_mac_dev_port_seen'),
+                   models.Index(fields=['last_seen'], name='ipreq_mac_seen')]

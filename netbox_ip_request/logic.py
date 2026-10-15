@@ -297,8 +297,39 @@ def reject(request_pk, approver, reason):
 
 # --------------------------------------------------------------------- 수집 대사
 def _flag(kind, ip, detail):
-    _, created = Discrepancy.objects.get_or_create(kind=kind, ip=ip, resolved=False, defaults={'detail': detail[:300]})
-    return int(created)
+    return _flag_many([(kind, ip, detail)]).get(kind, 0)
+
+
+def _flag_many(items):
+    """[(kind, ip, detail)] → 같은 (kind, ip) 의 미해결 불일치가 없을 때만 새로 만든다 (쿼리 몇 번으로 일괄).
+    반환: {kind: 새로 만든 수}. 같은 (kind, ip) 가 여러 번 오면 처음 detail 을 쓴다."""
+    want = {}
+    for kind, ip, detail in items:
+        want.setdefault((kind, str(ip)), (detail or '')[:300])
+    if not want:
+        return {}
+    keys, have = list(want), set()
+    for i in range(0, len(keys), 5000):
+        part = keys[i:i + 5000]
+        have |= set(Discrepancy.objects.filter(resolved=False, kind__in={k for k, _ in part},
+                                               ip__in={a for _, a in part}).values_list('kind', 'ip'))
+    new = [Discrepancy(kind=k, ip=a, detail=d) for (k, a), d in want.items() if (k, a) not in have]
+    Discrepancy.objects.bulk_create(new, batch_size=1000)
+    out = {}
+    for o in new:
+        out[o.kind] = out.get(o.kind, 0) + 1
+    return out
+
+
+def _managed_set(ips):
+    """ips 중 NetBox 대역(Prefix) 안에 있는 것 — 쿼리 1번"""
+    ips = list(ips)
+    if not ips:
+        return set()
+    with connection.cursor() as cur:
+        cur.execute("""SELECT host(h) FROM unnest(%s::inet[]) AS h
+                        WHERE EXISTS (SELECT 1 FROM ipam_prefix p WHERE p.prefix >>= h)""", [ips])
+        return {r[0] for r in cur.fetchall()}
 
 
 def _managed(ip):
@@ -306,19 +337,35 @@ def _managed(ip):
 
 
 def ingest_arp(device, entries, now=None):
-    """entries: [(ip, mac, interface)] 한 번의 폴링 결과 → 관측 적재, last_seen 갱신, 불일치 탐지."""
+    """entries: [(ip, mac, interface)] 한 번의 폴링 결과 → 관측 적재, last_seen 갱신, 불일치 탐지.
+    항목 수(코어 스위치는 수만 건)와 상관없이 쿼리 수가 거의 일정하도록 일괄 처리한다."""
     now = now or timezone.now()
     found = {'unregistered_use': 0, 'mac_mismatch': 0, 'ip_conflict': 0, 'revived': 0}
-    by_ip = {}
+    by_ip, itf_of = {}, {}
+    for ip, mac, itf in entries:
+        mac = norm_mac(mac)
+        by_ip.setdefault(ip, set()).add(mac)
+        itf_of[(ip, mac)] = itf                       # 같은 (IP, MAC)이 여러 번이면 마지막 인터페이스
+    flags = []
     with transaction.atomic():
-        for ip, mac, itf in entries:
-            mac = norm_mac(mac)
-            by_ip.setdefault(ip, set()).add(mac)
-            obj, created = ArpEntry.objects.get_or_create(ip=ip, mac=mac, device=device,
-                                                          defaults={'interface': itf, 'first_seen': now, 'last_seen': now})
-            if not created:
-                ArpEntry.objects.filter(pk=obj.pk).update(last_seen=now, interface=itf)
         ips = list(by_ip)
+        have = {}
+        for i in range(0, len(ips), 5000):
+            for pk, ip, mac, itf in ArpEntry.objects.filter(device=device, ip__in=ips[i:i + 5000]).values_list(
+                    'pk', 'ip', 'mac', 'interface'):
+                have[(ip, mac)] = (pk, itf)
+        seen = [have[k][0] for k in itf_of if k in have]
+        for i in range(0, len(seen), 5000):
+            ArpEntry.objects.filter(pk__in=seen[i:i + 5000]).update(last_seen=now)
+        moved = {}
+        for k, itf in itf_of.items():
+            if k in have and have[k][1] != itf:
+                moved.setdefault(itf, []).append(have[k][0])
+        for itf, pks in moved.items():               # 인터페이스가 바뀐 항목만 (보통 몇 건)
+            ArpEntry.objects.filter(pk__in=pks).update(interface=itf)
+        ArpEntry.objects.bulk_create([ArpEntry(ip=ip, mac=mac, device=device, interface=itf, first_seen=now, last_seen=now)
+                                      for (ip, mac), itf in itf_of.items() if (ip, mac) not in have],
+                                     batch_size=2000, ignore_conflicts=True)
         # last_seen 갱신은 변경 이력(changelog)을 남기지 않도록 SQL로 일괄 처리 (5분마다 이력 폭증 방지)
         with connection.cursor() as cur:
             cur.execute("""UPDATE ipam_ipaddress SET custom_field_data =
@@ -327,17 +374,18 @@ def ingest_arp(device, entries, now=None):
         objs = {}
         for o in IPAddress.objects.extra(where=['host(address)::inet = ANY(%s::inet[])'], params=[ips]):
             objs.setdefault(_host(o), []).append(o)
+        managed = _managed_set(ip for ip in by_ip if ip not in objs)
         for ip, macs in by_ip.items():
             if len(macs) > 1:
-                found['ip_conflict'] += _flag('ip_conflict', ip, f'{device}: {sorted(macs)}')
+                flags.append(('ip_conflict', ip, f'{device}: {sorted(macs)}'))
             rows = objs.get(ip, [])
             if not rows:
-                if _managed(ip):
-                    found['unregistered_use'] += _flag('unregistered_use', ip, f'{device}: {sorted(macs)} (대장 없음)')
+                if ip in managed:
+                    flags.append(('unregistered_use', ip, f'{device}: {sorted(macs)} (대장 없음)'))
                 continue
             for o in rows:
                 if o.status == 'quarantine':
-                    found['unregistered_use'] += _flag('unregistered_use', ip, f'{device}: {sorted(macs)} (격리 중 사용)')
+                    flags.append(('unregistered_use', ip, f'{device}: {sorted(macs)} (격리 중 사용)'))
                 elif o.status == 'dormant':
                     o.snapshot(); o.status = 'active'; o.save()
                     found['revived'] += 1
@@ -347,7 +395,9 @@ def ingest_arp(device, entries, now=None):
                     o.snapshot(); o.custom_field_data['host_mac'] = next(iter(macs)); o.save()
                     found['mac_filled'] = found.get('mac_filled', 0) + 1
                 elif o.status in ('active', 'dormant') and reg and reg not in macs:
-                    found['mac_mismatch'] += _flag('mac_mismatch', ip, f'대장 {reg} ≠ 관측 {sorted(macs)}')
+                    flags.append(('mac_mismatch', ip, f'대장 {reg} ≠ 관측 {sorted(macs)}'))
+        for k, n in _flag_many(flags).items():
+            found[k] = found.get(k, 0) + n
     return found
 
 
@@ -454,43 +504,82 @@ def _same_port(registered, observed):
     return re.sub(r'\.\d+$', '', r).lower() == re.sub(r'\.\d+$', '', observed.strip()).lower()
 
 
+def edge_map(macs=None):
+    """MAC → 그 MAC 이 '사용자 포트'에서 마지막으로 보인 MacEntry 값 {'device','port','vlan','last_seen'}.
+    사용자 포트 = 같은 수집 회차(device, port, last_seen 동일)에 MAC 이 3개 이하로 보인 포트 (_edge_port 와 같은 기준).
+    MAC 수·MAC 테이블 크기와 상관없이 SQL 1번 (예전: IP 마다 MAC 테이블 전체를 훑어 IP 가 늘수록 수십 분)."""
+    sql = """WITH g AS (SELECT device, port, last_seen FROM netbox_ip_request_macentry
+                        GROUP BY device, port, last_seen HAVING count(*) <= 3)
+             SELECT DISTINCT ON (m.mac) m.mac, m.device, m.port, m.vlan, m.last_seen
+               FROM netbox_ip_request_macentry m JOIN g USING (device, port, last_seen)
+              {where}
+              ORDER BY m.mac, m.last_seen DESC, m.id DESC"""
+    with connection.cursor() as cur:
+        if macs is None:
+            cur.execute(sql.format(where=''))
+        else:
+            cur.execute(sql.format(where='WHERE m.mac = ANY(%s)'), [list(macs)])
+        return {r[0]: {'device': r[1], 'port': r[2], 'vlan': r[3], 'last_seen': r[4]} for r in cur.fetchall()}
+
+
 def check_ports(fill_empty=True):
     """MAC 테이블(MacEntry)에서 본 실제 연결 위치와 IP에 등록된 스위치·포트를 비교.
     - 등록값이 비어 있으면 관측값을 제안(fill_empty=True면 채움)
     - 다르면 port_mismatch 불일치 알림
-    반환: {'matched', 'filled', 'mismatch', 'not_seen'}"""
+    반환: {'matched', 'filled', 'mismatch', 'not_seen'}
+    IP·MAC 테이블이 커도 쿼리 수가 일정하도록 한꺼번에 읽어 비교한다 (채울 IP 만 하나씩 저장 — 변경 이력 남김)."""
     from dcim.models import Device, Interface
     out = {'matched': 0, 'filled': 0, 'mismatch': 0, 'not_seen': 0}
-    for ip in IPAddress.objects.filter(status='active').exclude(custom_field_data__host_mac=None):
-        mac = ip.custom_field_data.get('host_mac')
-        if not mac:
-            continue
-        seen = [e for e in MacEntry.objects.filter(mac=mac).order_by('-last_seen') if _edge_port(e)]  # 업링크 제외
-        if not seen:
+    rows = [r for r in IPAddress.objects.filter(status='active').exclude(custom_field_data__host_mac=None)
+            .values('pk', 'address', 'custom_field_data') if (r['custom_field_data'] or {}).get('host_mac')]
+    if not rows:
+        return out
+    edge = edge_map({r['custom_field_data']['host_mac'] for r in rows})
+    num = lambda x: int(x) if x not in (None, '') and str(x).isdigit() else None
+    sw_ids = {num(r['custom_field_data'].get('switch')) for r in rows} - {None}
+    port_ids = {num(r['custom_field_data'].get('switch_port')) for r in rows} - {None}
+    dev_name = dict(Device.objects.filter(pk__in=sw_ids).values_list('pk', 'name'))
+    port_name = dict(Interface.objects.filter(pk__in=port_ids).values_list('pk', 'name'))
+    obs_devs = {e['device'] for e in edge.values()}
+    dev_by_name = dict(Device.objects.filter(name__in=obs_devs).values_list('name', 'pk'))
+    itfs = {}
+    for pk, did, name in Interface.objects.filter(device_id__in=dev_by_name.values()).values_list('pk', 'device_id', 'name'):
+        itfs.setdefault(did, []).append((name, pk))
+    flags = []
+    for r in rows:
+        cf = r['custom_field_data']
+        mac = cf['host_mac']
+        obs = edge.get(mac)
+        if not obs:
             out['not_seen'] += 1
             continue
-        obs = seen[0]
-        sw_id, port_id = ip.custom_field_data.get('switch'), ip.custom_field_data.get('switch_port')
-        sw = Device.objects.filter(pk=sw_id).first() if sw_id else None
-        port = Interface.objects.filter(pk=port_id).first() if port_id else None
-        if sw and port and sw.name == obs.device and _same_port(port.name, obs.port):
+        sw = dev_name.get(num(cf.get('switch')))
+        port = port_name.get(num(cf.get('switch_port')))
+        if sw and port and sw == obs['device'] and _same_port(port, obs['port']):
             out['matched'] += 1
-        elif not port and (not sw or sw.name == obs.device) and fill_empty:
+        elif not port and (not sw or sw == obs['device']) and fill_empty:
             # 포트가 비어 있고 (스위치도 비었거나 같은 스위치) → 관측값으로 채움
-            dev = Device.objects.filter(name=obs.device).first()
-            itf = dev and (Interface.objects.filter(device=dev, name=obs.port).first()
-                           or next((i for i in dev.interfaces.all() if _same_port(i.name, obs.port)), None)
-                           or Interface.objects.create(device=dev, name=re.sub(r'\.0$', '', obs.port), type='1000base-t'))
-            if not dev:
+            dpk = dev_by_name.get(obs['device'])
+            if not dpk:
                 out['not_seen'] += 1  # 수집 장비 이름이 NetBox Device 이름과 다름
-            elif itf:
-                ip.snapshot()
-                ip.custom_field_data.update({'switch': dev.pk, 'switch_port': itf.pk})
-                ip.save()
-                out['filled'] += 1
+                continue
+            lst = itfs.setdefault(dpk, [])
+            ipk = (next((pk for n, pk in lst if n == obs['port']), None)
+                   or next((pk for n, pk in lst if _same_port(n, obs['port'])), None))
+            if not ipk:
+                i = Interface.objects.create(device_id=dpk, name=re.sub(r'\.0$', '', obs['port']), type='1000base-t')
+                lst.append((i.name, i.pk))
+                ipk = i.pk
+            ip = IPAddress.objects.get(pk=r['pk'])
+            ip.snapshot()
+            ip.custom_field_data.update({'switch': dpk, 'switch_port': ipk})
+            ip.save()
+            out['filled'] += 1
         else:
-            reg = f"{sw.name if sw else '-'} {port.name if port else '-'}"
-            out['mismatch'] += _flag('port_mismatch', _host(ip), f'대장 {reg} ≠ 관측 {obs.device} {obs.port} (MAC {mac})')
+            reg = f"{sw or '-'} {port or '-'}"
+            flags.append(('port_mismatch', str(r['address'].ip),
+                          f"대장 {reg} ≠ 관측 {obs['device']} {obs['port']} (MAC {mac})"))
+    out['mismatch'] += _flag_many(flags).get('port_mismatch', 0)
     return out
 
 

@@ -35,3 +35,4 @@ systemctl is-active --quiet crond 2>/dev/null || systemctl enable --now crond 2>
 echo "설치 완료 — 지금 한 번 실행:"
 NBD=$NBD VERBOSE=1 /usr/local/sbin/ipam-watchdog | tee -a /var/log/ipam-watchdog.log
 echo "로그: tail -f /var/log/ipam-watchdog.log"
+echo "진단: sudo ipam-watchdog status   /   즉시 복구: sudo ipam-watchdog fix"

@@ -1,0 +1,27 @@
+#!/bin/bash
+# 워치독 셸 검증용 가짜 docker — 'docker compose ...' 를 테스트 NetBox(로컬)로 흉내 낸다 (verify_watchdog_sh.sh 전용)
+F=${FAKE_DIR:?}
+echo "$*" >> "$F/calls"
+shift   # compose
+case "$1" in
+  build) echo "built $*" ;;
+  ps)
+    if [[ "$*" == *Health* ]]; then echo healthy
+    elif [ "${2:-}" = --status ]; then cat "$F/running"; else sed 's/^/svc /' "$F/running"; fi ;;
+  exec)
+    [ -f "$F/exec_fail" ] && exit 1
+    code="${@: -1}"
+    cd /home/claude/netbox/netbox && /home/claude/nbvenv/bin/python manage.py shell -c "$code" 2>/dev/null ;;
+  restart)
+    shift
+    for s in "$@"; do
+      echo "restart $s" >> "$F/restarts"
+      if [ "$s" = netbox-worker ]; then   # 실제 작업자가 켜질 때 하는 일(ready → 끊긴 작업 정리)만 흉내
+        cd /home/claude/netbox/netbox && /home/claude/nbvenv/bin/python manage.py shell -c \
+          "from netbox_ip_request.jobs import clear_stale_jobs as c; c(on_start=True)" >/dev/null 2>&1
+      fi
+    done ;;
+  up)
+    echo "up ${@: -1}" >> "$F/restarts"; grep -qx "${@: -1}" "$F/running" || echo "${@: -1}" >> "$F/running" ;;
+esac
+exit 0

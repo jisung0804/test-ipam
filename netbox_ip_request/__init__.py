@@ -5,7 +5,7 @@ class IPRequestConfig(PluginConfig):
     name = 'netbox_ip_request'
     verbose_name = 'IP 발급 신청'
     description = 'IP 발급 신청·승인, ARP/MAC 대사, 장기 미사용 IP 판정'
-    version = '0.5.5'
+    version = '0.6.3'
     base_url = 'ip-request'
     min_version = '4.5.0'
     default_settings = {
@@ -39,6 +39,7 @@ class IPRequestConfig(PluginConfig):
         'contains_search': True,   # IP 주소 빠른 검색: 앞뒤 상관없이 포함 검색 (끄면 NetBox 기본)
         'l2_overwrite': True,      # 대사 때 실제 L2(ARP·MAC 테이블)로 대장의 MAC·스위치·포트를 덮어씀 (엑셀은 최초 값)
         'recon_days': 30,          # 대사: 이 기간 안에 ARP 에 안 보이면 '미관측'
+        'obs_retention_days': 90,    # ARP·MAC 관측 보관 일수(매일 정리). recon_days 보다 짧게 잡아도 recon_days 만큼은 남김
         'inventory_interval': 1440,  # 장비 인터페이스·VLAN 동기화 주기(분). 0 = 끔
     }
 

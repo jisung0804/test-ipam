@@ -116,7 +116,8 @@ try:
     Job.objects.filter(name__in=[c.name for c in J._plugin_system_jobs()], status__in=['pending', 'scheduled', 'running']).delete()
     now = timezone.now()
     w = J.watchdog_check()
-    live = {c.name: Job.objects.filter(name=c.name, status__in=['pending', 'scheduled']).count() for c in J._plugin_system_jobs()}
+    # 실제 작업자가 떠 있으면 곧바로 실행돼 '완료'로 바뀔 수 있으므로 점검 시각 이후 만든 행을 센다
+    live = {c.name: Job.objects.filter(name=c.name, created__gte=now).count() for c in J._plugin_system_jobs()}
     ok(w['action'] == 'requeued' and all(v == 1 for v in live.values()), '예약이 하나도 없음 → 4개 자동 작업 다시 예약', (w, live))
     ok(J.watchdog_check()['action'] == 'ok', '다시 점검하면 정상(중복 예약 없음)', J.watchdog_check())
     Job.objects.filter(name=NAME, status__in=['pending', 'scheduled']).delete()
