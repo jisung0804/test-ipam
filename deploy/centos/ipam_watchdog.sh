@@ -28,7 +28,7 @@ ts() { date '+%F %T'; }
 cd "$NBD" || { echo "$(ts) $NBD 없음"; exit 1; }
 PY="/opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py shell -c"
 nbpy() {  # netbox 컨테이너 안에서 파이썬 한 줄 실행 (최대 $2초)
-  timeout "${2:-180}" docker compose exec -T netbox $PY "$1" 2>/dev/null 9>&-
+  timeout -k 10 "${WD_EXEC_TIMEOUT:-${2:-180}}" docker compose exec -T netbox $PY "$1" 2>/dev/null 9>&-
 }
 
 health() {
@@ -38,7 +38,7 @@ health() {
 
 if [ "$MODE" = status ]; then
   echo "== 컨테이너"
-  docker compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}' 2>/dev/null | sed 's/^/  /'
+  timeout -k 5 30 docker compose ps --format 'table {{.Service}}\t{{.State}}\t{{.Status}}' 2>/dev/null | sed 's/^/  /'
   echo "== 자동 점검(cron)"
   if [ -f /etc/cron.d/ipam-watchdog ]; then
     echo "  설치됨: $(grep -v '^#' /etc/cron.d/ipam-watchdog | grep ipam-watchdog)"
@@ -69,7 +69,7 @@ restart() {  # restart <이유> <서비스...>  — 1시간 MAX_RESTARTS 번 제
   fi
   echo "$now" >> "$STATE/restarts"
   echo "$(ts) [복구] $why → $* 재시작"
-  docker compose restart "$@" >/dev/null 2>&1 9>&-
+  timeout -k 10 300 docker compose restart "$@" >/dev/null 2>&1 9>&-
   touch "$STATE/verify"                   # 다음 단계에서 복구 확인
   return 0
 }
@@ -88,11 +88,11 @@ verify_after_restart() {  # 재시작 뒤 실제로 풀렸는지 확인 (작업�
 }
 
 # 1) 컨테이너
-running=$(docker compose ps --status running --services 2>/dev/null)
+running=$(timeout -k 5 30 docker compose ps --status running --services 2>/dev/null)
 for s in postgres redis netbox netbox-worker; do
   if ! grep -qx "$s" <<< "$running"; then
     echo "$(ts) [복구] $s 꺼져 있음 → docker compose up -d $s"
-    docker compose up -d "$s" >/dev/null 2>&1 9>&-
+    timeout -k 10 300 docker compose up -d "$s" >/dev/null 2>&1 9>&-
   fi
 done
 

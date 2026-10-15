@@ -9,13 +9,28 @@ case "$1" in
     [ -n "${FAKE_BUILD_FAIL:-}" ] && { echo '#5 ERROR: failed to fetch pandas'; exit 1; }
     echo '#5 [2/5] RUN uv pip install'; echo '#5 DONE 3.2s'; echo "built" ;;
   cp)
-    src=$2; dst=$3; svc=${dst%%:*}; mkdir -p "$F/cp_$svc"; cp -r "$src" "$F/cp_$svc/"; echo "cp $svc" >> "$F/restarts" ;;
+    src=$2; dst=$3
+    if [ "$dst" = - ]; then                      # 컨테이너 → 표준출력(tar)
+      path=${src#*:}
+      case "$path" in
+        */python3.12/site-packages/netbox_ip_request/*)
+          f=${path##*/netbox_ip_request/}; tar -C /home/claude/netbox-ip-request/netbox_ip_request -cf - "$f" ;;
+        /etc/hostname) tar -C /etc -cf - hostname ;;
+        *) echo "no such file" >&2; exit 1 ;;
+      esac
+    else
+      svc=${dst%%:*}; mkdir -p "$F/cp_$svc"; cp -r "$src" "$F/cp_$svc/"; echo "cp $svc" >> "$F/restarts"
+    fi ;;
   ps)
     if [[ "$*" == *Health* ]]; then echo healthy
     elif [ "${2:-}" = --status ]; then cat "$F/running"; else sed 's/^/svc /' "$F/running"; fi ;;
   exec)
     [ -f "$F/exec_fail" ] && exit 1
+    if [ -f "$F/exec_hang" ]; then trap '' TERM; sleep 600; fi   # 운영 서버 증상: exec 가 끝나지 않고 TERM 도 무시
     code="${@: -1}"
+    if [ "$3" = postgres ] || [ "$3" = redis ]; then      # exec -T postgres sh -c '...' → 로컬 DB 로
+      POSTGRES_USER=postgres POSTGRES_DB=netbox PGHOST=/tmp sh -c "$code"; exit $?
+    fi
     cd /home/claude/netbox/netbox
     if [[ "$*" == *" shell -c "* ]]; then /home/claude/nbvenv/bin/python manage.py shell -c "$code" 2>/dev/null
     elif [[ "$*" == *" migrate "* ]]; then echo "migrate $*" >> "$F/restarts"; /home/claude/nbvenv/bin/python manage.py migrate netbox_ip_request --no-input 2>&1 | tail -2
@@ -30,6 +45,9 @@ case "$1" in
           "from netbox_ip_request.jobs import clear_stale_jobs as c; c(on_start=True)" >/dev/null 2>&1
       fi
     done ;;
+  stop|kill|start)
+    echo "$1 ${@: -1}" >> "$F/restarts" ;;
+  info) echo 27.0 ;;
   up)
     echo "up ${@: -1}" >> "$F/restarts"; grep -qx "${@: -1}" "$F/running" || echo "${@: -1}" >> "$F/running" ;;
 esac
