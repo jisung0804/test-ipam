@@ -20,7 +20,10 @@ STATE=${STATE:-/var/lib/ipam-watchdog}
 MAX_RESTARTS=${MAX_RESTARTS:-3}
 LOG=${LOG:-/var/log/ipam-watchdog.log}
 MODE=${1:-check}
-mkdir -p "$STATE"
+if [ "$(id -u)" != 0 ]; then                 # 상태 파일(/var/lib)·로그·docker 를 쓰므로 root 전용
+  echo "root 권한이 필요합니다 — sudo ipam-watchdog ${1:-}   (설치 전이면: sudo bash $0 ${1:-})"; exit 1
+fi
+mkdir -p "$STATE" || { echo "$STATE 를 만들 수 없음"; exit 1; }
 ts() { date '+%F %T'; }
 cd "$NBD" || { echo "$(ts) $NBD 없음"; exit 1; }
 PY="/opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py shell -c"
@@ -51,7 +54,7 @@ if [ "$MODE" = status ]; then
   exit 0
 fi
 
-exec 9>"$STATE/lock"
+exec 9>"$STATE/lock" || { echo "$(ts) [경고] 잠금 파일 $STATE/lock 을 열 수 없음"; exit 1; }
 flock -n 9 || exit 0                      # 앞 실행이 아직 안 끝났으면 건너뜀
 
 restart() {  # restart <이유> <서비스...>  — 1시간 MAX_RESTARTS 번 제한

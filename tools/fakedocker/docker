@@ -4,14 +4,23 @@ F=${FAKE_DIR:?}
 echo "$*" >> "$F/calls"
 shift   # compose
 case "$1" in
-  build) echo "built $*" ;;
+  build)
+    if [ -n "${FAKE_BUILD_HANG:-}" ]; then echo '#5 [2/5] RUN uv pip install'; sleep 30; fi
+    [ -n "${FAKE_BUILD_FAIL:-}" ] && { echo '#5 ERROR: failed to fetch pandas'; exit 1; }
+    echo '#5 [2/5] RUN uv pip install'; echo '#5 DONE 3.2s'; echo "built" ;;
+  cp)
+    src=$2; dst=$3; svc=${dst%%:*}; mkdir -p "$F/cp_$svc"; cp -r "$src" "$F/cp_$svc/"; echo "cp $svc" >> "$F/restarts" ;;
   ps)
     if [[ "$*" == *Health* ]]; then echo healthy
     elif [ "${2:-}" = --status ]; then cat "$F/running"; else sed 's/^/svc /' "$F/running"; fi ;;
   exec)
     [ -f "$F/exec_fail" ] && exit 1
     code="${@: -1}"
-    cd /home/claude/netbox/netbox && /home/claude/nbvenv/bin/python manage.py shell -c "$code" 2>/dev/null ;;
+    cd /home/claude/netbox/netbox
+    if [[ "$*" == *" shell -c "* ]]; then /home/claude/nbvenv/bin/python manage.py shell -c "$code" 2>/dev/null
+    elif [[ "$*" == *" migrate "* ]]; then echo "migrate $*" >> "$F/restarts"; /home/claude/nbvenv/bin/python manage.py migrate netbox_ip_request --no-input 2>&1 | tail -2
+    elif [[ "$*" == *"python -c "* ]]; then /home/claude/nbvenv/bin/python -c "$code"
+    fi ;;
   restart)
     shift
     for s in "$@"; do
